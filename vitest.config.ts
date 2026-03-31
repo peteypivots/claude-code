@@ -13,8 +13,11 @@ export default defineConfig({
     testTimeout: 30000,
   },
   resolve: {
-    alias: {
-      'bun:bundle': resolve(__dirname, 'src/shims/bun-bundle.ts'),
-    },
+    alias: [
+      // The source uses baseUrl:"." in tsconfig so bare "src/..." imports resolve from root
+      { find: /^src\//, replacement: resolve(__dirname, 'src') + '/' },
+      // bun:bundle is a Bun bundler virtual module; redirect to the dev shim
+      { find: 'bun:bundle', replacement: resolve(__dirname, 'src/shims/bun-bundle.ts') },
+    ],
   },
 })

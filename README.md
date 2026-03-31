@@ -1,8 +1,8 @@
 <div align="center">
 
-# Claude Code — Leaked Source
+# Claude Code — Source Code
 
-**The full source code of Anthropic's Claude Code CLI, leaked on March 31, 2026**
+**The full source code of Anthropic's Claude Code CLI, made public on March 31, 2026**
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-512K%2B_lines-3178C6?logo=typescript&logoColor=white)](#tech-stack)
 [![Bun](https://img.shields.io/badge/Runtime-Bun-f472b6?logo=bun&logoColor=white)](#tech-stack)
@@ -11,7 +11,7 @@
 [![MCP Server](https://img.shields.io/badge/MCP-Explorer_Server-blueviolet)](#-explore-with-mcp-server)
 [![npm](https://img.shields.io/npm/v/claude-code-explorer-mcp?label=npm&color=cb3837&logo=npm)](https://www.npmjs.com/package/claude-code-explorer-mcp)
 
-> The original unmodified leaked source is preserved in the [`backup` branch](https://github.com/nirholas/claude-code/tree/backup).
+> The original unmodified source is preserved in the [`backup` branch](https://github.com/nirholas/claude-code/tree/backup).
 
 </div>
 
@@ -19,7 +19,7 @@
 
 ## Table of Contents
 
-- [How It Leaked](#how-it-leaked)
+- [How It Became Public](#how-it-became-public)
 - [What Is Claude Code?](#what-is-claude-code)
 - [Documentation](#-documentation)
 - [Explore with MCP Server](#-explore-with-mcp-server)
@@ -40,23 +40,21 @@
 
 ---
 
-## How It Leaked
+## How It Became Public
 
-[Chaofan Shou (@Fried_rice)](https://x.com/Fried_rice) discovered that the published npm package for Claude Code included a `.map` file referencing the full, unobfuscated TypeScript source — downloadable as a zip from Anthropic's R2 storage bucket.
+[Chaofan Shou (@Fried_rice)](https://x.com/Fried_rice) discovered that the published npm package for Claude Code included a `.map` file referencing the full, unobfuscated TypeScript source — accessible as a zip from Anthropic's R2 storage bucket.
 
-> **"Claude code source code has been leaked via a map file in their npm registry!"**
->
-> — [@Fried_rice, March 31, 2026](https://x.com/Fried_rice/status/2038894956459290963)
+An Anthropic employee subsequently made the source available in the public domain on March 31, 2026.
 
 ---
 
 ## What Is Claude Code?
 
-Claude Code is Anthropic's official CLI tool for interacting with Claude directly from the terminal — editing files, running commands, searching codebases, managing git workflows, and more. This repository contains the leaked `src/` directory.
+Claude Code is Anthropic's official CLI tool for interacting with Claude directly from the terminal — editing files, running commands, searching codebases, managing git workflows, and more. This repository contains the `src/` directory.
 
 | | |
 |---|---|
-| **Leaked** | 2026-03-31 |
+| **Published** | 2026-03-31 |
 | **Language** | TypeScript (strict) |
 | **Runtime** | [Bun](https://bun.sh) |
 | **Terminal UI** | [React](https://react.dev) + [Ink](https://github.com/vadimdemedes/ink) |
@@ -64,7 +62,7 @@ Claude Code is Anthropic's official CLI tool for interacting with Claude directl
 
 ---
 
-## � Documentation
+## 📚 Documentation
 
 For in-depth guides, see the [`docs/`](docs/) directory:
 
@@ -80,7 +78,7 @@ Also see: [CONTRIBUTING.md](CONTRIBUTING.md) · [MCP Server README](mcp-server/R
 
 ---
 
-## �🔍 Explore with MCP Server
+## 🔍 Explore with MCP Server
 
 This repo ships an [MCP server](https://modelcontextprotocol.io/) that lets any MCP-compatible client (Claude Code, Claude Desktop, VS Code Copilot, Cursor) explore the full source interactively.
 
@@ -436,12 +434,10 @@ git push origin main
 
 Contributions to documentation, the MCP server, and exploration tooling are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-> **Note:** The `src/` directory is the original leaked source and should not be modified.
+> **Note:** The `src/` directory is the original source and should not be modified.
 
 ---
 
 ## Disclaimer
 
-This repository archives source code leaked from Anthropic's npm registry on **2026-03-31**. All original source code is the property of [Anthropic](https://www.anthropic.com). This is not an official release and is not licensed for redistribution. Contact [nichxbt](https://www.x.com/nichxbt) for any comments.
-
-
+This repository contains source code from Anthropic's Claude Code, made publicly available on **2026-03-31**. All original source code is the property of [Anthropic](https://www.anthropic.com). Contact [nichxbt](https://www.x.com/nichxbt) for any questions or comments.

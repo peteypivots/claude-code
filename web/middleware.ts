@@ -12,10 +12,11 @@ function generateNonce(): string {
 }
 
 function buildCsp(nonce: string): string {
+  const isDev = process.env.NODE_ENV === "development";
   return [
     "default-src 'self'",
-    // Nonce-based approach: no unsafe-inline or unsafe-eval
-    `script-src 'self' 'nonce-${nonce}'`,
+    // In dev, React Fast Refresh requires 'unsafe-eval'; omit it in production
+    `script-src 'self' 'nonce-${nonce}'${isDev ? " 'unsafe-eval'" : ""}`,
     // Tailwind and CSS-in-JS require unsafe-inline for styles
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
