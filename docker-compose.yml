@@ -38,10 +38,10 @@ services:
       POOL_VERBOSE: "true"
       
       # ── Model Configuration (from .env) ────────────────
-      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b-v2}
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b-v3}
       LOCAL_MODEL: ${LOCAL_MODEL:-qwen2.5:14b-instruct}
       REASONING_MODEL: ${REASONING_MODEL:-deepseek-r1:7b}
-      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v2}
+      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v3}
       DREAM_MODEL: ${DREAM_MODEL:-qwen2.5:7b-instruct}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       OLLAMA_MODEL_OPUS: ${OLLAMA_MODEL_OPUS:-}
@@ -75,6 +75,8 @@ services:
       - claude-home:/root/.claude
       - claude-config:/root/.config/claude
       - claude-cache:/root/.cache/claude
+      # Global config file (NOT inside .claude/ directory - separate file at ~/)
+      - ./.docker-persist/.claude.json:/root/.claude.json
       
       # SSH/Git keys (optional)
       - ~/.ssh:/root/.ssh:ro
