@@ -95,11 +95,17 @@ interface RoutingDecision {
 /**
  * Get routing decision using LLM orchestrator or static rules
  * This is async because it may call the orchestrator model
+ * 
+ * @param messages - Conversation messages
+ * @param tools - Available tools
+ * @param config - Router config
+ * @param retryCount - Number of retries (for adaptive temperature)
  */
 export async function getRoutingDecisionAsync(
   messages: Message[],
   tools: Tools,
   config: RouterConfig = DEFAULT_CONFIG,
+  retryCount = 0,
 ): Promise<RoutingDecision> {
   if (!config.enabled) {
     return { useLocal: false, reason: 'routing_disabled', model: 'claude' }
@@ -145,10 +151,10 @@ export async function getRoutingDecisionAsync(
       const orchestratorDecision = await getRoutingDecision(context, {
         cacheTtlMs: config.routingCacheTtlMs,
         verbose: config.verbose,
-      })
+      }, retryCount)
 
       if (config.verbose) {
-        console.log(`[Router] Orchestrator decision: ${orchestratorDecision.action} (${orchestratorDecision.reasoning})`)
+        console.log(`[Router] Orchestrator decision: ${orchestratorDecision.action} (${orchestratorDecision.reasoning})${retryCount > 0 ? ` [retry #${retryCount}]` : ''}`)
       }
 
       return mapOrchestratorDecision(orchestratorDecision, config)
@@ -288,12 +294,16 @@ function shouldUseLocalModelStatic(
 }
 
 // ============================================================================
-// Loop Detection
+// Loop Detection & Adaptive Temperature
 // ============================================================================
 
 // Track consecutive blocked tool attempts (per tool name)
 const blockedToolAttempts = new Map<string, number>()
-const MAX_BLOCKED_ATTEMPTS = 1 // After this many blocks, force end turn - keep low since model doesn't learn
+const MAX_BLOCKED_ATTEMPTS = 2 // Increased to allow temperature retries first
+
+// Track retry count for current conversation (for adaptive temperature)
+let conversationRetryCount = 0
+const MAX_RETRIES = 3 // Max temperature retries before forcing end turn
 
 /**
  * Detect if the model is stuck in a tool loop.
@@ -330,12 +340,21 @@ function detectToolLoop(messages: Message[], threshold = 3): string | null {
 
 /**
  * Track blocked tool attempts. Returns true if we should force end the turn.
+ * Also increments retry count for adaptive temperature.
  */
 function trackBlockedTool(toolName: string): boolean {
   const attempts = (blockedToolAttempts.get(toolName) || 0) + 1
   blockedToolAttempts.set(toolName, attempts)
-  routerLog(`Blocked tool "${toolName}" attempt #${attempts}`)
-  return attempts >= MAX_BLOCKED_ATTEMPTS
+  conversationRetryCount++
+  routerLog(`Blocked tool "${toolName}" attempt #${attempts}, conversation retry #${conversationRetryCount}`)
+  return attempts >= MAX_BLOCKED_ATTEMPTS && conversationRetryCount >= MAX_RETRIES
+}
+
+/**
+ * Get current retry count for adaptive temperature
+ */
+export function getConversationRetryCount(): number {
+  return conversationRetryCount
 }
 
 /**
@@ -343,6 +362,7 @@ function trackBlockedTool(toolName: string): boolean {
  */
 function resetBlockedToolTracking(): void {
   blockedToolAttempts.clear()
+  conversationRetryCount = 0
 }
 
 // ============================================================================
@@ -630,9 +650,10 @@ export async function* queryModelWithRouting(
   routerLog(`Tools count: ${tools?.length || 0}`)
   routerLog(`Tool names: ${tools?.map(t => t.name).join(', ') || 'none'}`)
   routerLog(`Config enabled: ${config.enabled}, useLLMOrchestrator: ${config.useLLMOrchestrator}`)
+  routerLog(`Conversation retry count: ${conversationRetryCount}`)
 
-  // Get routing decision (async - may call orchestrator)
-  let decision = await getRoutingDecisionAsync(messages, tools, config)
+  // Get routing decision (async - may call orchestrator with adaptive temperature)
+  let decision = await getRoutingDecisionAsync(messages, tools, config, conversationRetryCount)
 
   routerLog(`Decision: action=${decision.action}, useLocal=${decision.useLocal}, reason=${decision.reason}, model=${decision.model}, suggestedTool=${decision.suggestedTool || 'none'}`)
 

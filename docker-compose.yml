@@ -38,12 +38,17 @@ services:
       POOL_VERBOSE: "true"
       
       # ── Model Configuration (from .env) ────────────────
-      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b}
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b-v2}
       LOCAL_MODEL: ${LOCAL_MODEL:-qwen2.5:14b-instruct}
       REASONING_MODEL: ${REASONING_MODEL:-deepseek-r1:7b}
-      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b}
+      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v2}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       OLLAMA_MODEL_OPUS: ${OLLAMA_MODEL_OPUS:-}
+      
+      # ── Adaptive Temperature (retry with increased creativity) ──
+      ORCHESTRATOR_TEMPERATURE: ${ORCHESTRATOR_TEMPERATURE:-0}
+      ORCHESTRATOR_TEMP_STEP: ${ORCHESTRATOR_TEMP_STEP:-0.2}
+      ORCHESTRATOR_MAX_TEMP: ${ORCHESTRATOR_MAX_TEMP:-0.7}
       
       # ── Context Window ─────────────────────────────────
       # Don't set by default - let each model's Modelfile control its context size
@@ -97,7 +102,7 @@ services:
     
     # ── Port Mappings ──────────────────────────────────────
     ports:
-      - "3000:3000"  # Next.js dev server (web UI)
+      - "3003:3000"  # Next.js dev server (web UI) - moved from 3000 for Grafana
       - "4001:4001"  # Vite preview
       - "5174:5173"  # Vite dev server
     

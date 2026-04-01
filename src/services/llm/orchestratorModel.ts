@@ -35,6 +35,12 @@ export interface OrchestratorConfig {
   verbose: boolean
   /** Timeout for routing call (default: 5000ms - we want this fast) */
   timeout: number
+  /** Base temperature for routing (default: 0 = deterministic) */
+  temperature: number
+  /** Temperature increment per retry (default: 0.2) */
+  temperatureStep: number
+  /** Maximum temperature (default: 0.7) */
+  maxTemperature: number
 }
 
 const DEFAULT_CONFIG: OrchestratorConfig = {
@@ -43,6 +49,9 @@ const DEFAULT_CONFIG: OrchestratorConfig = {
   cacheTtlMs: parseInt(process.env.ROUTER_CACHE_TTL_MS || '300000', 10), // 5 minutes
   verbose: process.env.ROUTER_VERBOSE === 'true',
   timeout: parseInt(process.env.ROUTER_TIMEOUT_MS || '5000', 10),
+  temperature: parseFloat(process.env.ORCHESTRATOR_TEMPERATURE || '0'),
+  temperatureStep: parseFloat(process.env.ORCHESTRATOR_TEMP_STEP || '0.2'),
+  maxTemperature: parseFloat(process.env.ORCHESTRATOR_MAX_TEMP || '0.7'),
 }
 
 // ============================================================================
@@ -142,23 +151,46 @@ function getOrchestratorProvider(config: OrchestratorConfig): OllamaProvider {
  * Get routing decision from orchestrator model
  * 
  * Uses cache when available, falls back to static rules on failure.
+ * 
+ * @param context - Routing context with user message, tool count, etc.
+ * @param config - Orchestrator config overrides
+ * @param retryCount - Number of retries (increases temperature adaptively)
  */
 export async function getRoutingDecision(
   context: RoutingContext,
   config: Partial<OrchestratorConfig> = {},
+  retryCount = 0,
 ): Promise<RoutingDecision> {
   const fullConfig = { ...DEFAULT_CONFIG, ...config }
   
-  // Check cache first
-  const cacheKey = getCacheKey(context)
-  const cached = getCached(cacheKey, fullConfig)
-  if (cached) {
-    return cached
+  // Calculate adaptive temperature based on retry count
+  const adaptiveTemp = Math.min(
+    fullConfig.temperature + (retryCount * fullConfig.temperatureStep),
+    fullConfig.maxTemperature
+  )
+  
+  // Skip cache on retries (non-zero temperature means we want variety)
+  if (retryCount === 0 && adaptiveTemp === 0) {
+    const cacheKey = getCacheKey(context)
+    const cached = getCached(cacheKey, fullConfig)
+    if (cached) {
+      return cached
+    }
   }
 
   try {
-    const decision = await callOrchestrator(context, fullConfig)
-    setCache(cacheKey, decision, fullConfig)
+    const decision = await callOrchestrator(context, fullConfig, adaptiveTemp)
+    
+    // Only cache deterministic (temperature=0) decisions
+    if (adaptiveTemp === 0) {
+      const cacheKey = getCacheKey(context)
+      setCache(cacheKey, decision, fullConfig)
+    }
+    
+    if (fullConfig.verbose && retryCount > 0) {
+      console.log(`[Orchestrator] Retry #${retryCount} with temperature=${adaptiveTemp.toFixed(2)}`)
+    }
+    
     return decision
   } catch (error) {
     if (fullConfig.verbose) {
@@ -171,10 +203,15 @@ export async function getRoutingDecision(
 
 /**
  * Call the orchestrator model for a routing decision
+ * 
+ * @param context - Routing context
+ * @param config - Orchestrator config
+ * @param temperature - Temperature for this call (0 = deterministic, higher = more creative)
  */
 async function callOrchestrator(
   context: RoutingContext,
   config: OrchestratorConfig,
+  temperature = 0,
 ): Promise<RoutingDecision> {
   const provider = getOrchestratorProvider(config)
   
@@ -185,7 +222,7 @@ async function callOrchestrator(
   const fullPrompt = `${fewShot}\n\n---\n\n${userPrompt}`
 
   if (config.verbose) {
-    console.log(`[Orchestrator] Calling ${config.model} for routing decision...`)
+    console.log(`[Orchestrator] Calling ${config.model} for routing decision (temp=${temperature.toFixed(2)})...`)
   }
 
   const startTime = Date.now()
@@ -195,7 +232,7 @@ async function callOrchestrator(
     messages: [{ role: 'user', content: fullPrompt }],
     systemPrompt: ROUTING_SYSTEM_PROMPT,
     maxTokens: 150, // Routing decisions should be short
-    temperature: 0, // Deterministic routing
+    temperature, // Adaptive temperature: 0 = deterministic, higher = more creative on retries
   })
 
   const elapsed = Date.now() - startTime
