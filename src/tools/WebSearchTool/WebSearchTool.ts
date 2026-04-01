@@ -15,6 +15,7 @@ import { getMainLoopModel, getSmallFastModel } from '../../utils/model/model.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
 import { getWebSearchPrompt, WEB_SEARCH_TOOL_NAME } from './prompt.js'
+import { searchWithSearxng, getSearxngUrl } from './searxng.js'
 import {
   getToolUseSummary,
   renderToolResultMessage,
@@ -189,6 +190,15 @@ export const WebSearchTool = buildTool({
       return true
     }
 
+    // Enable for Ollama when SearXNG is configured
+    if (process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true') {
+      const searxngUrl = getSearxngUrl()
+      if (searxngUrl) {
+        console.log('[WebSearchTool] Enabled via SearXNG backend')
+        return true
+      }
+    }
+
     return false
   },
   get inputSchema(): InputSchema {
@@ -254,6 +264,53 @@ export const WebSearchTool = buildTool({
   async call(input, context, _canUseTool, _parentMessage, onProgress) {
     const startTime = performance.now()
     const { query } = input
+    
+    // Use SearXNG when running with Ollama (local-first mode)
+    // Always prefer SearXNG when OLLAMA_BASE_URL is set, since Anthropic's web_search 
+    // tool requires a valid Anthropic API subscription
+    const useLocalSearch = !!(process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true')
+    const searxngUrl = process.env.SEARXNG_URL || (useLocalSearch ? 'http://searxng:8080' : null)
+    
+    if (useLocalSearch && searxngUrl) {
+      console.log('[WebSearchTool] Using SearXNG backend for local model')
+      
+      // Report progress
+      if (onProgress) {
+        onProgress({
+          toolUseID: `searxng-query-${Date.now()}`,
+          data: {
+            type: 'query_update',
+            query,
+          },
+        })
+      }
+      
+      const result = await searchWithSearxng(query, {
+        allowedDomains: input.allowed_domains,
+        blockedDomains: input.blocked_domains,
+        signal: context.abortController.signal,
+      })
+      
+      // Report results received
+      if (onProgress && result.results.length > 0) {
+        const firstResult = result.results[0]
+        const resultCount = typeof firstResult === 'object' && 'content' in firstResult 
+          ? firstResult.content.length 
+          : 0
+        onProgress({
+          toolUseID: `searxng-results-${Date.now()}`,
+          data: {
+            type: 'search_results_received',
+            resultCount,
+            query,
+          },
+        })
+      }
+      
+      return { data: result }
+    }
+    
+    // Original Anthropic web_search implementation
     const userMessage = createUserMessage({
       content: 'Perform a web search for the query: ' + query,
     })
@@ -424,7 +481,7 @@ export const WebSearchTool = buildTool({
     })
 
     formattedOutput +=
-      '\nREMINDER: You MUST include the sources above in your response to the user using markdown hyperlinks.'
+      '\nIMPORTANT: Use the information above to answer the user\'s original question. Include relevant sources using markdown hyperlinks.'
 
     return {
       tool_use_id: toolUseID,

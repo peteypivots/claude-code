@@ -12,6 +12,14 @@ import {
   type MessageContent,
   ProviderError,
 } from './types.js'
+import { appendFileSync } from 'fs'
+
+const ROUTER_LOG = '/tmp/router-debug.log'
+function ollamaLog(msg: string) {
+  const line = `[${new Date().toISOString()}] [OllamaClient] ${msg}\n`
+  try { appendFileSync(ROUTER_LOG, line) } catch {}
+  try { appendFileSync('/proc/1/fd/2', line) } catch {}
+}
 
 export interface OllamaConfig {
   baseUrl: string
@@ -46,6 +54,127 @@ export function supportsNativeTools(model: string): boolean {
     }
   }
   return false
+}
+
+/**
+ * Map Claude model names to Ollama equivalents
+ * Uses env vars from .env file:
+ *   - OLLAMA_MODEL: Override all mappings
+ *   - LOCAL_MODEL: Default for sonnet-tier
+ *   - ORCHESTRATOR_MODEL: Default for haiku-tier  
+ *   - REASONING_MODEL: For reasoning tasks
+ *   - OLLAMA_MODEL_OPUS/SONNET/HAIKU: Tier-specific overrides
+ */
+const DEFAULT_OLLAMA_MODEL = 'qwen2.5:3b-instruct'
+
+function mapModelToOllama(model: string): string {
+  const normalizedModel = model.toLowerCase()
+  
+  // If it's already an Ollama model (no 'claude' in name), use as-is
+  if (!normalizedModel.includes('claude') && !normalizedModel.includes('anthropic')) {
+    return model
+  }
+  
+  // Global override takes precedence
+  const configuredModel = process.env.OLLAMA_MODEL
+  if (configuredModel) {
+    return configuredModel
+  }
+  
+  // Tier-specific mappings using .env configuration
+  if (normalizedModel.includes('opus')) {
+    // Opus = most capable, use largest available or REASONING_MODEL
+    return process.env.OLLAMA_MODEL_OPUS || process.env.REASONING_MODEL || 'qwen3.5:27b'
+  }
+  if (normalizedModel.includes('sonnet')) {
+    // Sonnet = balanced, use LOCAL_MODEL (worker model)
+    return process.env.OLLAMA_MODEL_SONNET || process.env.LOCAL_MODEL || 'qwen2.5:14b-instruct'
+  }
+  if (normalizedModel.includes('haiku')) {
+    // Haiku = fast/cheap, use ORCHESTRATOR_MODEL
+    return process.env.OLLAMA_MODEL_HAIKU || process.env.ORCHESTRATOR_MODEL || 'qwen2.5:3b-instruct'
+  }
+  
+  // Unknown Claude model, use LOCAL_MODEL or default
+  return process.env.LOCAL_MODEL || DEFAULT_OLLAMA_MODEL
+}
+
+/**
+ * Parse text-based tool calls from model output
+ * Models fine-tuned on claude-code may output tool calls as:
+ *   [Tool Use: ToolName]
+ *   {"param": "value"}
+ * 
+ * @param text - Model output text
+ * @param allowedToolNames - Optional set of allowed tool names. If provided, tools not in this set are skipped.
+ */
+function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array<{ name: string; input: Record<string, unknown> }> {
+  const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = []
+  
+  // Match pattern 1: [Tool Use: ToolName] followed by JSON
+  const toolUsePattern = /\[Tool Use:\s*([^\]]+)\]\s*(\{[\s\S]*?\})/g
+  let match
+  
+  while ((match = toolUsePattern.exec(text)) !== null) {
+    const toolName = match[1].trim()
+    const argsJson = match[2]
+    
+    // Skip if tool is not in allowed list
+    if (allowedToolNames && !allowedToolNames.has(toolName)) {
+      ollamaLog(`Skipping disallowed tool call: ${toolName} (tool has been disabled)`)
+      continue
+    }
+    
+    try {
+      const input = JSON.parse(argsJson)
+      toolCalls.push({ name: toolName, input })
+      ollamaLog(`Parsed text tool call: ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
+    } catch (e) {
+      ollamaLog(`Failed to parse tool args for ${toolName}: ${argsJson.substring(0, 100)}`)
+    }
+  }
+  
+  // Match pattern 2: <tool-name>{json}</tool-name> (XML-style)
+  // Map kebab-case to known tool names
+  const toolNameMap: Record<string, string> = {
+    'web-search': 'WebSearch',
+    'web-fetch': 'WebFetch',
+    'bash': 'Bash',
+    'read': 'Read',
+    'write': 'Write',
+    'edit': 'Edit',
+    'glob': 'Glob',
+    'grep': 'Grep',
+    'agent': 'Agent',
+    'list-mcp-resources-tool': 'ListMcpResourcesTool',
+    'read-mcp-resource-tool': 'ReadMcpResourceTool',
+    'ask-user-question': 'AskUserQuestion',
+  }
+  
+  const xmlToolPattern = /<([a-z][a-z0-9-]*)>\s*(\{[\s\S]*?\})\s*<\/\1>/gi
+  while ((match = xmlToolPattern.exec(text)) !== null) {
+    const xmlTagName = match[1].toLowerCase()
+    const argsJson = match[2]
+    
+    // Map to actual tool name
+    const toolName = toolNameMap[xmlTagName] || xmlTagName
+    
+    // Skip if tool is not in allowed list
+    if (allowedToolNames && !allowedToolNames.has(toolName)) {
+      ollamaLog(`Skipping disallowed XML tool call: ${toolName} (tool has been disabled)`)
+      continue
+    }
+    
+    try {
+      const input = JSON.parse(argsJson)
+      toolCalls.push({ name: toolName, input })
+      ollamaLog(`Parsed XML tool call: <${xmlTagName}> -> ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
+    } catch (e) {
+      ollamaLog(`Failed to parse XML tool args for <${xmlTagName}>: ${argsJson.substring(0, 100)}`)
+    }
+  }
+  
+  return toolCalls
 }
 
 /**
@@ -129,18 +258,26 @@ export class OllamaProvider implements ILLMProvider {
   async complete(options: LLMRequestOptions): Promise<LLMResponse> {
     const messages = this.convertMessages(options.messages)
     
+    // Map Claude model names to Ollama equivalents
+    const ollamaModel = mapModelToOllama(options.model)
+    
     // Convert tools to Ollama format if provided
     const ollamaTools = options.tools ? convertToolsToOllamaFormat(options.tools as AnthropicTool[]) : undefined
 
+    // Only override num_ctx if explicitly set - otherwise use model's Modelfile default
+    const ollamaOptions: Record<string, unknown> = {
+      num_gpu: 99,    // Use all GPU layers
+    }
+    if (process.env.OLLAMA_NUM_CTX) {
+      ollamaOptions.num_ctx = parseInt(process.env.OLLAMA_NUM_CTX, 10)
+    }
+
     const requestBody: Record<string, unknown> = {
-      model: options.model,
+      model: ollamaModel,
       messages,
       system: options.systemPrompt,
       stream: false,
-      options: {
-        num_ctx: 8192,  // Reduced from 32K to fit in GPU VRAM
-        num_gpu: 99,    // Use all GPU layers
-      },
+      options: ollamaOptions,
       ...(options.temperature !== undefined && {
         temperature: options.temperature,
       }),
@@ -259,18 +396,44 @@ export class OllamaProvider implements ILLMProvider {
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
     const messages = this.convertMessages(options.messages)
     
+    // DEBUG: Log converted messages - especially tool results
+    if (process.env.OLLAMA_DEBUG) {
+      console.log(`[OllamaClient] Sending ${messages.length} messages to model`)
+      for (const m of messages) {
+        if (m.role === 'tool') {
+          console.log(`[OllamaClient]   TOOL msg: tool_call_id=${(m as any).tool_call_id}, content=${String((m as any).content).substring(0, 100)}...`)
+        } else {
+          const contentPreview = typeof m.content === 'string' ? m.content.substring(0, 80) : JSON.stringify(m.content).substring(0, 80)
+          console.log(`[OllamaClient]   ${m.role}: ${contentPreview}...`)
+        }
+      }
+    }
+    
+    // Map Claude model names to Ollama equivalents
+    const ollamaModel = mapModelToOllama(options.model)
+    
     // Convert tools to Ollama format if provided
     const ollamaTools = options.tools ? convertToolsToOllamaFormat(options.tools as AnthropicTool[]) : undefined
+    
+    // Build set of allowed tool names for text-based tool parsing
+    const allowedToolNames = ollamaTools 
+      ? new Set(ollamaTools.map(t => t.function.name))
+      : undefined
+
+    // Only override num_ctx if explicitly set - otherwise use model's Modelfile default
+    const streamOptions: Record<string, unknown> = {
+      num_gpu: 99,    // Use all GPU layers
+    }
+    if (process.env.OLLAMA_NUM_CTX) {
+      streamOptions.num_ctx = parseInt(process.env.OLLAMA_NUM_CTX, 10)
+    }
 
     const requestBody: Record<string, unknown> = {
-      model: options.model,
+      model: ollamaModel,
       messages,
       system: options.systemPrompt,
       stream: true,
-      options: {
-        num_ctx: 8192,  // Reduced from 32K to fit in GPU VRAM
-        num_gpu: 99,    // Use all GPU layers
-      },
+      options: streamOptions,
       ...(options.temperature !== undefined && {
         temperature: options.temperature,
       }),
@@ -282,6 +445,10 @@ export class OllamaProvider implements ILLMProvider {
     // Add tools if provided
     if (ollamaTools && ollamaTools.length > 0) {
       requestBody.tools = ollamaTools
+      ollamaLog(`stream() sending ${ollamaTools.length} tools to model ${ollamaModel}`)
+      ollamaLog(`First tool: ${JSON.stringify(ollamaTools[0]).substring(0, 300)}`)
+    } else {
+      ollamaLog(`stream() NO tools sent to model ${ollamaModel}`)
     }
 
     let lastError: Error | undefined
@@ -318,6 +485,11 @@ export class OllamaProvider implements ILLMProvider {
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
+        
+        // Accumulate tool calls from streaming chunks (they only appear in non-done chunks)
+        const accumulatedToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = []
+        // Accumulate text content for text-based tool parsing
+        let accumulatedText = ''
 
         try {
           while (true) {
@@ -335,8 +507,14 @@ export class OllamaProvider implements ILLMProvider {
 
               try {
                 const chunk = JSON.parse(line)
+                
+                // Debug: log raw Ollama chunks
+                if (process.env.OLLAMA_DEBUG === 'true') {
+                  ollamaLog(`Raw chunk: ${JSON.stringify(chunk).substring(0, 500)}`)
+                }
 
                 if (chunk.message?.content) {
+                  accumulatedText += chunk.message.content
                   yield {
                     type: 'content_block_delta',
                     delta: {
@@ -346,41 +524,75 @@ export class OllamaProvider implements ILLMProvider {
                   }
                 }
                 
-                // Handle tool calls in streaming response
+                // Handle tool calls in streaming response - accumulate them
                 if (chunk.message?.tool_calls && Array.isArray(chunk.message.tool_calls)) {
                   for (const toolCall of chunk.message.tool_calls) {
+                    const toolId = toolCall.id || `toolu_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`
+                    const toolName = toolCall.function?.name || toolCall.name
+                    const toolInput = toolCall.function?.arguments || toolCall.arguments || {}
+                    
+                    // Accumulate for final message
+                    accumulatedToolCalls.push({ id: toolId, name: toolName, input: toolInput })
+                    
                     yield {
                       type: 'content_block_start',
                       content_block: {
                         type: 'tool_use',
-                        id: toolCall.id || `toolu_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`,
-                        name: toolCall.function?.name || toolCall.name,
-                        input: toolCall.function?.arguments || toolCall.arguments || {},
+                        id: toolId,
+                        name: toolName,
+                        input: toolInput,
                       },
                     }
                   }
                 }
 
                 if (chunk.done) {
-                  // Build final content array
+                  // Build final content array using accumulated tool calls
                   const finalContent: MessageContent[] = []
+                  let blockedToolCall: string | null = null
                   
-                  if (chunk.message?.content) {
-                    finalContent.push({ type: 'text', text: chunk.message.content })
-                  }
-                  
-                  if (chunk.message?.tool_calls) {
-                    for (const toolCall of chunk.message.tool_calls) {
-                      finalContent.push({
-                        type: 'tool_use',
-                        id: toolCall.id || `toolu_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`,
-                        name: toolCall.function?.name || toolCall.name,
-                        input: toolCall.function?.arguments || toolCall.arguments || {},
-                      })
+                  // Check for text-based tool calls if no native tool_calls were found
+                  if (accumulatedToolCalls.length === 0 && accumulatedText) {
+                    // First check if there are any tool calls that would be blocked
+                    const allTextToolCalls = parseTextToolCalls(accumulatedText, undefined) // Get all parsed calls
+                    const filteredToolCalls = parseTextToolCalls(accumulatedText, allowedToolNames) // Get only allowed
+                    
+                    // If some were blocked, record which one
+                    if (allTextToolCalls.length > 0 && filteredToolCalls.length === 0) {
+                      blockedToolCall = allTextToolCalls[0]?.name || null
+                    }
+                    
+                    for (const tc of filteredToolCalls) {
+                      const toolId = `toolu_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`
+                      accumulatedToolCalls.push({ id: toolId, name: tc.name, input: tc.input })
                     }
                   }
                   
-                  const hasToolCalls = finalContent.some(c => c.type === 'tool_use')
+                  // Only include text content if no tool calls (tool-using text is for the LLM, not user)
+                  if (accumulatedToolCalls.length === 0 && chunk.message?.content) {
+                    finalContent.push({ type: 'text', text: chunk.message.content })
+                  }
+                  
+                  // If a tool was blocked and there's no other content, provide helpful message
+                  if (blockedToolCall && finalContent.length === 0 && accumulatedToolCalls.length === 0) {
+                    finalContent.push({ 
+                      type: 'text', 
+                      text: `I attempted to use ${blockedToolCall} again, but it has been disabled due to a loop. I should now answer the user's question based on the information I've already gathered from previous tool results. If I need more information, I should try a different tool.`
+                    })
+                    ollamaLog(`Injected fallback text for blocked tool: ${blockedToolCall}`)
+                  }
+                  
+                  // Use accumulated tool calls (from native or text-parsed)
+                  for (const tc of accumulatedToolCalls) {
+                    finalContent.push({
+                      type: 'tool_use',
+                      id: tc.id,
+                      name: tc.name,
+                      input: tc.input,
+                    })
+                  }
+                  
+                  const hasToolCalls = accumulatedToolCalls.length > 0
                   
                   yield {
                     type: 'message_stop',

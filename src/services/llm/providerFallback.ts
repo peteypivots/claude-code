@@ -21,8 +21,8 @@ export interface FallbackConfig {
 
 const DEFAULT_CONFIG: FallbackConfig = {
   primary: 'ollama',
-  secondary: 'anthropic',
-  enableFallback: true,
+  secondary: undefined, // No default fallback - must be explicitly configured
+  enableFallback: false,
 }
 
 export class FallbackProvider implements ILLMProvider {

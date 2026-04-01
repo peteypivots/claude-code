@@ -31,7 +31,11 @@ const buildOptions: esbuild.BuildOptions = {
   outdir: OUT_DIR,
   // CSS imported from JS is auto-emitted alongside the JS output
   loader: { '.css': 'css' },
-  minify,
+  // Granular minification: compress syntax+whitespace but keep identifiers
+  // readable for stack traces
+  minifyWhitespace: minify,
+  minifySyntax: minify,
+  minifyIdentifiers: false,
   sourcemap: minify ? false : 'inline',
   tsconfig: resolve(ROOT, 'src/server/web/tsconfig.json'),
   logLevel: 'info',

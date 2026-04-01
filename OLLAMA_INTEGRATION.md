@@ -282,6 +282,83 @@ OLLAMA_BASE_URL=http://localhost:11434
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+## Web Search Integration (SearXNG)
+
+When running in local-first mode, Claude Code uses **SearXNG** for web search instead of external APIs.
+
+### Configuration
+
+Add to `docker-compose.yml` (already configured):
+
+```yaml
+services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+
+  claude-code:
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+```
+
+### How It Works
+
+1. `WebSearchTool` detects local-first mode via `OLLAMA_BASE_URL` env var
+2. When triggered, calls SearXNG API instead of external search APIs
+3. Results are formatted with "Key information found:" summary to help model answer
+4. Search instruction says "IMPORTANT: Use the information above to answer the user's question"
+
+### Files
+
+- `src/tools/WebSearchTool/searxng.ts` - SearXNG REST client
+- `src/tools/WebSearchTool/WebSearchTool.ts` - Tool implementation (checks for local mode)
+
+### Testing
+
+```bash
+# Direct SearXNG test
+curl "http://localhost:8888/search?q=capital+of+france&format=json"
+
+# Through Claude Code
+docker exec -i claude-code-instance sh -c 'echo "What is the capital of France?" | /root/claude-code'
+```
+
+## Tool Loop Detection & Force-Answer
+
+Small local models sometimes get stuck calling the same tool repeatedly. The router detects and handles this.
+
+### Detection Mechanism
+
+Located in `src/services/llm/queryModelRouter.ts`:
+
+```typescript
+// Detects 3+ consecutive calls to the same tool
+detectToolLoop(messages): { detected: boolean, toolName: string }
+```
+
+### Force-Answer Behavior
+
+When a loop is detected AND web search results exist in the conversation:
+
+1. After `MAX_BLOCKED_ATTEMPTS=1` blocked loop, forces a text response
+2. Extracts key info from search results in message history
+3. Returns formatted answer using the search snippets
+
+### Fallback Text (Important!)
+
+In `ollamaClient.ts`, when tool results return empty, the fallback text must NOT mention specific tools or resources that might confuse the model:
+
+```typescript
+// Good - generic guidance
+"I should now answer the user's question based on the information I've already gathered..."
+
+// Bad - mentions specific resource that model might try to access
+"I should access MCP resources to find more information..."
+```
+
 ## Integration Checklist
 
 - [x] Provider abstraction layer created
@@ -291,33 +368,25 @@ ANTHROPIC_API_KEY=sk-ant-...
 - [x] Global router with singleton pattern
 - [x] Environment configuration
 - [x] Docker Compose integration
-- [ ] QueryEngine integration (Phase 3)
+- [x] Web search via SearXNG
+- [x] Tool loop detection and handling
+- [x] Force-answer with search results
 - [ ] Health checks (Phase 5)
 - [ ] E2E testing (Phase 6)
 
 ## Next Steps
 
-### Phase 3: Integration with QueryEngine
+### Phase 5: Health Checks & Monitoring
 
-- Modify `src/QueryEngine.ts` to use `getGlobalLLMRouter()`
-- Update message handling to use provider abstraction
-- Ensure streaming still works correctly
-
-### Phase 4: Docker Integration
-
-- Add health checks to docker-compose.yml
-- Verify container networking works
-- Test fallback with Ollama stopped
-
-### Phase 5: Logging & Visibility
-
-- Add provider-aware logging
-- Track usage metrics per provider
-- Create status command for CLI
+- Add health endpoint for SearXNG availability
+- Add Prometheus metrics for routing decisions
+- Track tool loop frequency
 
 ### Phase 6: Testing & Validation
 
 - Unit tests for each provider
+- Integration tests for web search flow
+- Test force-answer behavior with various query types
 - Integration tests for fallback scenarios
 - Benchmark: qwen2.5:7b vs Claude
 - Test with different models

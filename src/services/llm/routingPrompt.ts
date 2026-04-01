@@ -54,11 +54,12 @@ OUTPUT FORMAT (JSON only, no markdown):
 {"action":"local|reason|escalate","model":"model-name","reasoning":"brief reason","confidence":0.0-1.0,"suggestedTool":"tool-name or null"}
 
 ROUTING RULES:
-- Default to "local" unless there's a clear reason not to
+- Default to "local" — most tasks can be handled locally
 - Use "reason" for: math problems, step-by-step analysis, planning sequences
-- Use "escalate" for: architecture decisions, security review, creative writing, unclear user intent
+- Use "escalate" ONLY for: architecture decisions, security review, creative writing, unclear user intent
+- If the user asks about real-time info (weather, news, prices), route to "local" with suggestedTool "WebSearch" or "WebFetch"
+- If the query clearly requires a tool (file read, web search, shell command), always set suggestedTool
 - If conversation is very long (depth > 25), consider "escalate" for coherence
-- If many tools available (> 15), may need "escalate" for complex orchestration
 
 Be concise. Output only valid JSON.`
 
@@ -81,7 +82,22 @@ export const ROUTING_FEW_SHOT_EXAMPLES = [
   {
     user: 'Read the file src/main.ts and tell me what it does',
     context: { toolCount: 10, depth: 3 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"File read and summarize","confidence":0.90,"suggestedTool":"read_file"}',
+    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"File read and summarize","confidence":0.90,"suggestedTool":"Read"}',
+  },
+  {
+    user: 'What is the weather in Seattle tomorrow?',
+    context: { toolCount: 33, depth: 1 },
+    response: '{ "action":"local","model":"qwen2.5:7b-instruct","reasoning":"Real-time info query, use web search tool","confidence":0.92,"suggestedTool":"WebSearch"}',
+  },
+  {
+    user: 'Look up the latest Node.js release notes',
+    context: { toolCount: 33, depth: 2 },
+    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Web lookup task","confidence":0.90,"suggestedTool":"WebFetch"}',
+  },
+  {
+    user: 'Search the codebase for how authentication works',
+    context: { toolCount: 33, depth: 1 },
+    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Code search task, tool count does not matter","confidence":0.93,"suggestedTool":"Grep"}',
   },
   
   // Reasoning tasks
@@ -98,19 +114,19 @@ export const ROUTING_FEW_SHOT_EXAMPLES = [
   {
     user: 'Plan out how to refactor this function to be more efficient, considering memory usage and time complexity',
     context: { toolCount: 12, depth: 5 },
-    response: '{"action":"reason","model":"deepseek-r1:7b","reasoning":"Multi-factor optimization planning","confidence":0.88,"suggestedTool":"read_file"}',
+    response: '{"action":"reason","model":"deepseek-r1:7b","reasoning":"Multi-factor optimization planning","confidence":0.88,"suggestedTool":"Read"}',
   },
 
   // Escalation tasks
   {
     user: 'Architect a new microservices system for handling 1M requests/second with proper security, caching, and failover',
-    context: { toolCount: 20, depth: 1 },
+    context: { toolCount: 33, depth: 1 },
     response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Complex architecture requiring deep expertise and creative design","confidence":0.95,"suggestedTool":null}',
   },
   {
     user: 'Review this code for security vulnerabilities and suggest fixes',
     context: { toolCount: 15, depth: 8 },
-    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Security review requires careful analysis by stronger model","confidence":0.93,"suggestedTool":"read_file"}',
+    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Security review requires careful analysis by stronger model","confidence":0.93,"suggestedTool":"Read"}',
   },
   {
     user: 'I\'m not sure what I need, but something feels wrong with how the app handles user sessions',
@@ -134,17 +150,12 @@ export const ROUTING_FEW_SHOT_EXAMPLES = [
 export function buildRoutingPrompt(context: RoutingContext): string {
   const parts: string[] = []
 
-  // Add context summary
+  // Only send what the orchestrator needs — message and depth.
+  // Do NOT include tool count or tool names: small models interpret
+  // "33 tools" as complexity and escalate unnecessarily.
   parts.push(`CONTEXT:`)
   parts.push(`- Message length: ${context.userMessage.length} chars`)
-  parts.push(`- Tools available: ${context.toolCount}`)
   parts.push(`- Conversation depth: ${context.conversationDepth} messages`)
-  
-  if (context.toolNames && context.toolNames.length > 0) {
-    const toolList = context.toolNames.slice(0, 10).join(', ')
-    const more = context.toolNames.length > 10 ? ` (+${context.toolNames.length - 10} more)` : ''
-    parts.push(`- Tool names: ${toolList}${more}`)
-  }
 
   if (context.memoryHint) {
     parts.push(`- Memory hint: ${context.memoryHint}`)
@@ -173,7 +184,7 @@ export function buildRoutingPrompt(context: RoutingContext): string {
  */
 export function buildFewShotExamples(): string {
   return ROUTING_FEW_SHOT_EXAMPLES.map(ex => {
-    const contextStr = `[tools:${ex.context.toolCount}, depth:${ex.context.depth}]`
+    const contextStr = `[depth:${ex.context.depth}]`
     return `User ${contextStr}: ${ex.user}\nResponse: ${ex.response}`
   }).join('\n\n')
 }

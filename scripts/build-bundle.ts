@@ -162,10 +162,11 @@ const buildOptions: esbuild.BuildOptions = {
   // Use tsconfig for baseUrl / paths resolution (complements plugin above)
   tsconfig: resolve(ROOT, 'tsconfig.json'),
 
-  // Alias bun:bundle to our runtime shim + stub for native addons not in this build
+  // Alias bun:bundle to our runtime shim + use the pure-TS color-diff port
+  // instead of the native NAPI addon (not available in bundled builds).
   alias: {
     'bun:bundle': resolve(ROOT, 'src/shims/bun-bundle.ts'),
-    'color-diff-napi': resolve(ROOT, 'src/shims/color-diff-napi.ts'),
+    'color-diff-napi': resolve(ROOT, 'src/native-ts/color-diff/index.ts'),
   },
 
   // Don't bundle node built-ins or problematic native packages
@@ -236,8 +237,12 @@ const buildOptions: esbuild.BuildOptions = {
   // Source maps for production debugging (external .map files)
   sourcemap: noSourcemap ? false : 'external',
 
-  // Minification for production
-  minify,
+  // Granular minification: enable syntax and whitespace compression but
+  // disable identifier mangling so stack traces show real function names
+  // instead of cryptic 2-3 char identifiers (mCa, Gu, Kf, etc.).
+  minifyWhitespace: minify,
+  minifySyntax: minify,
+  minifyIdentifiers: false,
 
   // Tree shaking (on by default, explicit for clarity)
   treeShaking: true,

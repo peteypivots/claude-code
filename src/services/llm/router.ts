@@ -27,14 +27,24 @@ export interface RouterConfig {
   logProvider?: boolean
 }
 
+/**
+ * Check if we have a valid Anthropic API key (not placeholder/missing)
+ */
+function hasValidAnthropicKey(): boolean {
+  const key = process.env.ANTHROPIC_API_KEY
+  return !!key && !key.includes('YOUR_API_KEY') && key.length > 10
+}
+
 const CONFIG_DEFAULTS: RouterConfig = {
   primaryProvider: process.env.LLM_PRIMARY_PROVIDER
     ? (process.env.LLM_PRIMARY_PROVIDER as LLMProvider)
     : 'ollama',
+  // Only use Anthropic as secondary if we have a valid key
   secondaryProvider: process.env.LLM_SECONDARY_PROVIDER
     ? (process.env.LLM_SECONDARY_PROVIDER as LLMProvider)
-    : 'anthropic',
-  enableFallback: process.env.LLM_ENABLE_FALLBACK !== 'false',
+    : hasValidAnthropicKey() ? 'anthropic' : undefined,
+  // Disable fallback if no valid secondary provider key
+  enableFallback: process.env.LLM_ENABLE_FALLBACK !== 'false' && hasValidAnthropicKey(),
   ollamaBaseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
   ollamaTimeout: parseInt(process.env.OLLAMA_TIMEOUT || '120000', 10),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY,
@@ -59,15 +69,18 @@ export class LLMRouter implements ILLMProvider {
       timeout: this.config.ollamaTimeout,
     }))
 
-    this.providers.set('anthropic', new AnthropicProvider({
-      apiKey: this.config.anthropicApiKey,
-    }))
+    // Only create Anthropic provider if we have a valid key
+    if (hasValidAnthropicKey()) {
+      this.providers.set('anthropic', new AnthropicProvider({
+        apiKey: this.config.anthropicApiKey,
+      }))
+    }
 
-    // Create fallback router
+    // Create fallback router - don't default secondary to 'anthropic'
     this.router = new FallbackProvider(this.providers, {
       primary: this.config.primaryProvider || 'ollama',
-      secondary: this.config.secondaryProvider || 'anthropic',
-      enableFallback: this.config.enableFallback ?? true,
+      secondary: this.config.secondaryProvider, // undefined if no valid key
+      enableFallback: this.config.enableFallback ?? false,
       logFallback: (provider, reason) => {
         if (this.config.logProvider) {
           logError(`Switched to ${provider} provider: ${reason}`)

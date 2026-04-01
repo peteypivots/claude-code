@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   claude-code:
     build:
@@ -7,32 +5,56 @@ services:
       dockerfile: Dockerfile
     image: claude-code:latest
     container_name: claude-code-instance
-    
     # ── Promtail Labels for Log Aggregation ────────────────
     labels:
-      promtail.enabled: "true"
-      promtail.job: "claude-code"
-      promtail.service: "claude-code-cli"
-      promtail.environment: "production"
-      promtail.namespace: "claude"
+      logging: promtail
+      logging_job: claude-code
     
     # ── Environment & API Key ──────────────────────────────
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_AUTH_TOKEN: "skip"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       YAK_NODE_NAME: ${YAK_NODE_NAME:-claude-code-1}
       YAK_MASTER_HOST: ${YAK_MASTER_HOST:-localhost}
+      
+      # ── Sandbox Mode (allow --dangerously-skip-permissions as root) ──
+      IS_SANDBOX: "1"
       
       # ── Ollama Configuration (Local-first Strategy) ────
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-120000}
       OLLAMA_RETRIES: ${OLLAMA_RETRIES:-3}
       
+      # ── SearXNG Web Search (for local models) ──────────
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      
       # ── LLM Provider Selection ─────────────────────────
       LLM_PRIMARY_PROVIDER: ${LLM_PRIMARY_PROVIDER:-ollama}
       LLM_SECONDARY_PROVIDER: ${LLM_SECONDARY_PROVIDER:-anthropic}
       LLM_ENABLE_FALLBACK: ${LLM_ENABLE_FALLBACK:-true}
       LLM_LOG_PROVIDER: ${LLM_LOG_PROVIDER:-false}
+      ROUTER_VERBOSE: "true"
+      POOL_VERBOSE: "true"
+      
+      # ── Model Configuration (from .env) ────────────────
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b}
+      LOCAL_MODEL: ${LOCAL_MODEL:-qwen2.5:14b-instruct}
+      REASONING_MODEL: ${REASONING_MODEL:-deepseek-r1:7b}
+      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      OLLAMA_MODEL_OPUS: ${OLLAMA_MODEL_OPUS:-}
+      
+      # ── Context Window ─────────────────────────────────
+      # Don't set by default - let each model's Modelfile control its context size
+      # Set explicitly only if you need to override (e.g., OLLAMA_NUM_CTX=8192)
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-}
+      # Use minimal tool descriptions for pre-trained models (saves tokens)
+      OLLAMA_MINIMAL_TOOL_DESC: ${OLLAMA_MINIMAL_TOOL_DESC:-false}
+      # Debug: log raw Ollama responses
+      OLLAMA_DEBUG: ${OLLAMA_DEBUG:-true}
+      OLLAMA_MODEL_SONNET: ${OLLAMA_MODEL_SONNET:-}
+      OLLAMA_MODEL_HAIKU: ${OLLAMA_MODEL_HAIKU:-}
     
     # ── Volume Mounts for Yak Integration & Data ───────────
     volumes:
@@ -44,6 +66,7 @@ services:
       
       # Claude Code data persistence
       - claude-data:/data
+      - claude-home:/root/.claude
       - claude-config:/root/.config/claude
       - claude-cache:/root/.cache/claude
       
@@ -56,9 +79,7 @@ services:
       driver: json-file
       options:
         max-size: "100m"
-        max-file: "10"
-        labels: "promtail.enabled,promtail.job,promtail.service"
-    
+        max-file: "10"    
     # ── Resource Limits ────────────────────────────────────
     deploy:
       resources:
@@ -74,40 +95,29 @@ services:
       - claude-network
       - ollama_default  # Connect to Ollama's network for direct access
     
+    # ── Port Mappings ──────────────────────────────────────
+    ports:
+      - "3000:3000"  # Next.js dev server (web UI)
+      - "4001:4001"  # Vite preview
+      - "5174:5173"  # Vite dev server
+    
     # ── Restart Policy ────────────────────────────────────
     restart: unless-stopped
     
     # ── Entrypoint with Yak Support ───────────────────────
     entrypoint: /usr/local/bin/yak-init.sh
-    command: /app/cli.mjs
+    command: ["tail", "-f", "/dev/null"]
     
     # Keep container running
     stdin_open: true
     tty: true
 
-  # ── Optional: Promtail for Log Shipping ────────────────
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail-claude
-    
-    volumes:
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./promtail-config.yaml:/etc/promtail/config.yaml
-    
-    command: -config.file=/etc/promtail/config.yaml
-    
-    networks:
-      - claude-network
-    
-    restart: unless-stopped
-    
-    depends_on:
-      - claude-code
 
 # ── Named Volumes for Persistence ──────────────────────
 volumes:
   claude-data:
+    driver: local
+  claude-home:
     driver: local
   claude-config:
     driver: local

@@ -90,9 +90,9 @@ export async function findSuitableShell(): Promise<string> {
 
   // Check user's preferred shell from environment
   const env_shell = process.env.SHELL
-  // Only consider SHELL if it's bash or zsh
+  // Consider SHELL if it's bash, zsh, or sh (for minimal containers)
   const isEnvShellSupported =
-    env_shell && (env_shell.includes('bash') || env_shell.includes('zsh'))
+    env_shell && (env_shell.includes('bash') || env_shell.includes('zsh') || env_shell.endsWith('/sh'))
   const preferBash = env_shell?.includes('bash')
 
   // Try to locate shells using which (uses Bun.which when available)
@@ -102,7 +102,8 @@ export async function findSuitableShell(): Promise<string> {
   const shellPaths = ['/bin', '/usr/bin', '/usr/local/bin', '/opt/homebrew/bin']
 
   // Order shells based on user preference
-  const shellOrder = preferBash ? ['bash', 'zsh'] : ['zsh', 'bash']
+  // Include 'sh' as a fallback for minimal containers (Alpine/BusyBox)
+  const shellOrder = preferBash ? ['bash', 'zsh', 'sh'] : ['zsh', 'bash', 'sh']
   const supportedShells = shellOrder.flatMap(shell =>
     shellPaths.map(path => `${path}/${shell}`),
   )

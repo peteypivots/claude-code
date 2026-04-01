@@ -102,6 +102,8 @@ export async function* streamFromLLMProvider(
     maxTokens: params.max_tokens,
     systemPrompt: convertSystemForProvider(params.system),
     temperature: (params as any).temperature,
+    // Pass tools through so Ollama can use native function calling
+    tools: (params as any).tools as LLMRequestOptions['tools'],
   }
   
   // Stream from the provider
@@ -128,6 +130,7 @@ export async function completeFromLLMProvider(
     maxTokens: params.max_tokens,
     systemPrompt: convertSystemForProvider(params.system),
     temperature: (params as any).temperature,
+    tools: (params as any).tools as LLMRequestOptions['tools'],
   }
   
   // Get complete response from provider
@@ -161,6 +164,12 @@ export async function completeFromLLMProvider(
 export async function shouldFallbackToAnthropicForProvider(): Promise<boolean> {
   if (!isOllamaEnabled()) {
     return false; // Already using Anthropic, no fallback needed
+  }
+
+  // Don't fallback to Anthropic if the key is invalid/placeholder
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey || apiKey.includes('YOUR_API_KEY')) {
+    return false;
   }
 
   const router = getGlobalLLMRouter();

@@ -205,7 +205,9 @@ export async function* createStreamAdapter(
     } as BetaRawMessageStopEvent
   } catch (error) {
     // On error, emit a stop event to gracefully close the stream
-    console.error('[streamAdapter] Stream error:', error)
+    // Log only the message to avoid dumping minified stack traces
+    const errorMsg = error instanceof Error ? error.message : String(error)
+    console.error('[streamAdapter] Stream error:', errorMsg)
     yield {
       type: 'message_stop',
     } as BetaRawMessageStopEvent

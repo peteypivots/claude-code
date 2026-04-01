@@ -114,7 +114,13 @@ function detectGateway({
   if (headers) {
     // Header names are already lowercase from the Headers API
     const headerNames: string[] = []
-    headers.forEach((_, key) => headerNames.push(key))
+    if (typeof headers.forEach === 'function') {
+      // Proper Headers object
+      headers.forEach((_, key) => headerNames.push(key))
+    } else if (typeof headers === 'object') {
+      // Plain object headers (e.g., from error responses)
+      headerNames.push(...Object.keys(headers))
+    }
     for (const [gw, { prefixes }] of Object.entries(GATEWAY_FINGERPRINTS)) {
       if (prefixes.some(p => headerNames.some(h => h.startsWith(p)))) {
         return gw as KnownGateway

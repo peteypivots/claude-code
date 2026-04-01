@@ -68,7 +68,12 @@ export type MaxVersionConfig = {
  * This approach keeps version comparison logic simple while maintaining traceability via the SHA.
  */
 export async function assertMinVersion(): Promise<void> {
-  if (process.env.NODE_ENV === 'test') {
+  // Disabled for self-hosted fork - no version enforcement
+  if (process.env.NODE_ENV === 'test' || process.env.SKIP_VERSION_CHECK === 'true') {
+    return
+  }
+  // For forked versions, always skip the remote version check
+  if (MACRO.VERSION.includes('leaked') || MACRO.VERSION === '0.0.0' || !process.env.ANTHROPIC_API_KEY) {
     return
   }
 

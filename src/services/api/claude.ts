@@ -1865,6 +1865,11 @@ async function* queryModel(
         
         // If we didn't get a stream from the provider, use Anthropic (primary or fallback)
         if (!resultStream) {
+          // Guard: don't call Anthropic with a placeholder/invalid key
+          const anthropicKey = process.env.ANTHROPIC_API_KEY
+          if (!anthropicKey || anthropicKey.includes('YOUR_API_KEY')) {
+            throw new Error('No valid Anthropic API key configured and Ollama provider failed. Set ANTHROPIC_API_KEY or ensure Ollama is running.')
+          }
           const result = await anthropic.beta.messages
             .create(
               { ...params, stream: true },
