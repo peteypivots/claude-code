@@ -42,6 +42,7 @@ services:
       LOCAL_MODEL: ${LOCAL_MODEL:-qwen2.5:14b-instruct}
       REASONING_MODEL: ${REASONING_MODEL:-deepseek-r1:7b}
       SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v2}
+      DREAM_MODEL: ${DREAM_MODEL:-qwen2.5:7b-instruct}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       OLLAMA_MODEL_OPUS: ${OLLAMA_MODEL_OPUS:-}
       

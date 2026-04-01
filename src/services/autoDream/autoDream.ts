@@ -221,6 +221,14 @@ Sessions since last consolidation (${sessionIds.length}):
 ${sessionIds.map(id => `- ${id}`).join('\n')}`
       const prompt = buildConsolidationPrompt(memoryRoot, transcriptDir, extra)
 
+      // Allow explicit model override for Dream via DREAM_MODEL env var
+      const dreamModel = process.env.DREAM_MODEL
+      const parentOptions = context.toolUseContext.options
+      const dreamOverrides: Parameters<typeof runForkedAgent>[0]['overrides'] = {
+        abortController,
+        ...(dreamModel ? { options: { ...parentOptions, mainLoopModel: dreamModel } } : {}),
+      }
+
       const result = await runForkedAgent({
         promptMessages: [createUserMessage({ content: prompt })],
         cacheSafeParams: createCacheSafeParams(context),
@@ -228,7 +236,7 @@ ${sessionIds.map(id => `- ${id}`).join('\n')}`
         querySource: 'auto_dream',
         forkLabel: 'auto_dream',
         skipTranscript: true,
-        overrides: { abortController },
+        overrides: dreamOverrides,
         onMessage: makeDreamProgressWatcher(taskId, setAppState),
       })
 
