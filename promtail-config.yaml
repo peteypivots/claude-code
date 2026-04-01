@@ -1,0 +1,102 @@
+# Promtail Configuration for Claude Code Logging
+# Captures logs from Claude Code container and ships them to Loki/log service
+
+server:
+  http_listen_port: 3101
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  # Send logs to Loki (update URL as needed)
+  - url: http://loki:3100/loki/api/v1/push
+    # Alternative: remote Loki/log server
+    # - url: http://logs.example.com:3100/loki/api/v1/push
+
+scrape_configs:
+  # ── Docker Container Logs via Docker Server ─────────────
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    
+    # Only scrape containers with promtail.enabled=true label
+    relabel_configs:
+      # Drop if promtail.enabled != true
+      - source_labels: [__meta_docker_container_label_promtail_enabled]
+        regex: "true"
+        action: keep
+      
+      # Use container name as instance
+      - source_labels: [__meta_docker_container_name]
+        target_label: instance
+        regex: '/(.*)'
+        replacement: '${1}'
+      
+      # Add container ID as label
+      - source_labels: [__meta_docker_container_id]
+        target_label: container_id
+      
+      # Extract job name from label (e.g., promtail.job=claude-code)
+      - source_labels: [__meta_docker_container_label_promtail_job]
+        target_label: job
+      
+      # Extract service name
+      - source_labels: [__meta_docker_container_label_promtail_service]
+        target_label: service
+      
+      # Extract environment
+      - source_labels: [__meta_docker_container_label_promtail_environment]
+        target_label: env
+      
+      # Extract namespace
+      - source_labels: [__meta_docker_container_label_promtail_namespace]
+        target_label: namespace
+      
+      # Add container labels as tags
+      - source_labels: [__meta_docker_container_label_promtail_tags]
+        target_label: tags
+    
+    # Parse log timestamps if structured
+    pipeline_stages:
+      - json:
+          expressions:
+            timestamp: timestamp
+            level: level
+            message: message
+      - labels:
+          level:
+          service:
+          container:
+      - timestamp:
+          source: timestamp
+          format: Unix
+          action_on_failure: fudge
+
+  # ── Syslog/Host Logs (optional) ────────────────────────
+  # Note: Syslog support requires Promtail Enterprise
+  # - job_name: syslog
+  #   syslog:
+  #     listen_address: 0.0.0.0:1514
+  #   relabel_configs:
+  #     - source_labels: ['__syslog_message_hostname']
+  #       target_label: 'hostname'
+  #     - source_labels: ['__syslog_message_app_name']
+  #       target_label: 'app'
+
+  # ── Kubernetes (if running in k8s) ───────────────────
+  # - job_name: kubernetes
+  #   kubernetes_sd_configs:
+  #     - role: pod
+  #
+  #   relabel_configs:
+  #     - source_labels: [__meta_kubernetes_namespace_name]
+  #       action: replace
+  #       target_label: namespace
+  #     - source_labels: [__meta_kubernetes_pod_name]
+  #       action: replace
+  #       target_label: pod
+  #     - source_labels: [__meta_kubernetes_container_name]
+  #       action: replace
+  #       target_label: container

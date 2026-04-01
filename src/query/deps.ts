@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { queryModelWithStreaming } from '../services/api/claude.js'
+import { queryModelWithRouting } from '../services/llm/queryModelRouter.js'
 import { autoCompactIfNeeded } from '../services/compact/autoCompact.js'
 import { microcompactMessages } from '../services/compact/microCompact.js'
 
@@ -30,9 +31,45 @@ export type QueryDeps = {
   uuid: () => string
 }
 
+/**
+ * Check if local-first routing is enabled via environment
+ */
+function isLocalFirstEnabled(): boolean {
+  return !!process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true'
+}
+
 export function productionDeps(): QueryDeps {
+  // Use local-first routing when OLLAMA_BASE_URL or LOCAL_FIRST is set
+  const callModel = isLocalFirstEnabled()
+    ? (queryModelWithRouting as typeof queryModelWithStreaming)
+    : queryModelWithStreaming
+
+  return {
+    callModel,
+    microcompact: microcompactMessages,
+    autocompact: autoCompactIfNeeded,
+    uuid: randomUUID,
+  }
+}
+
+/**
+ * Force Claude-only deps (bypass local routing)
+ */
+export function claudeOnlyDeps(): QueryDeps {
   return {
     callModel: queryModelWithStreaming,
+    microcompact: microcompactMessages,
+    autocompact: autoCompactIfNeeded,
+    uuid: randomUUID,
+  }
+}
+
+/**
+ * Force local-first deps (always try Ollama first)
+ */
+export function localFirstDeps(): QueryDeps {
+  return {
+    callModel: queryModelWithRouting as typeof queryModelWithStreaming,
     microcompact: microcompactMessages,
     autocompact: autoCompactIfNeeded,
     uuid: randomUUID,

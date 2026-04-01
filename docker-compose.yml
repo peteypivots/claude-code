@@ -1,0 +1,123 @@
+version: '3.8'
+
+services:
+  claude-code:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: claude-code:latest
+    container_name: claude-code-instance
+    
+    # ── Promtail Labels for Log Aggregation ────────────────
+    labels:
+      promtail.enabled: "true"
+      promtail.job: "claude-code"
+      promtail.service: "claude-code-cli"
+      promtail.environment: "production"
+      promtail.namespace: "claude"
+    
+    # ── Environment & API Key ──────────────────────────────
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      YAK_NODE_NAME: ${YAK_NODE_NAME:-claude-code-1}
+      YAK_MASTER_HOST: ${YAK_MASTER_HOST:-localhost}
+      
+      # ── Ollama Configuration (Local-first Strategy) ────
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-120000}
+      OLLAMA_RETRIES: ${OLLAMA_RETRIES:-3}
+      
+      # ── LLM Provider Selection ─────────────────────────
+      LLM_PRIMARY_PROVIDER: ${LLM_PRIMARY_PROVIDER:-ollama}
+      LLM_SECONDARY_PROVIDER: ${LLM_SECONDARY_PROVIDER:-anthropic}
+      LLM_ENABLE_FALLBACK: ${LLM_ENABLE_FALLBACK:-true}
+      LLM_LOG_PROVIDER: ${LLM_LOG_PROVIDER:-false}
+    
+    # ── Volume Mounts for Yak Integration & Data ───────────
+    volumes:
+      # Yaknode binary and configuration
+      - /home/ables/gitroot/docker_scripts/yaknode:/opt/yaksoft/yaknode:ro
+      - /home/ables/gitroot/docker_scripts/host.key:/opt/yaksoft/host.key:ro
+      - /home/ables/gitroot/docker_scripts/yak-libs:/opt/yaksoft/libs:ro
+      - /home/ables/gitroot/docker_scripts/yak-init.sh:/usr/local/bin/yak-init.sh:ro
+      
+      # Claude Code data persistence
+      - claude-data:/data
+      - claude-config:/root/.config/claude
+      - claude-cache:/root/.cache/claude
+      
+      # SSH/Git keys (optional)
+      - ~/.ssh:/root/.ssh:ro
+      - ~/.gitconfig:/root/.gitconfig:ro
+    
+    # ── Logging Configuration ──────────────────────────────
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "10"
+        labels: "promtail.enabled,promtail.job,promtail.service"
+    
+    # ── Resource Limits ────────────────────────────────────
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    
+    # ── Networking ─────────────────────────────────────────
+    networks:
+      - claude-network
+      - ollama_default  # Connect to Ollama's network for direct access
+    
+    # ── Restart Policy ────────────────────────────────────
+    restart: unless-stopped
+    
+    # ── Entrypoint with Yak Support ───────────────────────
+    entrypoint: /usr/local/bin/yak-init.sh
+    command: /app/cli.mjs
+    
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+  # ── Optional: Promtail for Log Shipping ────────────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail-claude
+    
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./promtail-config.yaml:/etc/promtail/config.yaml
+    
+    command: -config.file=/etc/promtail/config.yaml
+    
+    networks:
+      - claude-network
+    
+    restart: unless-stopped
+    
+    depends_on:
+      - claude-code
+
+# ── Named Volumes for Persistence ──────────────────────
+volumes:
+  claude-data:
+    driver: local
+  claude-config:
+    driver: local
+  claude-cache:
+    driver: local
+
+# ── Networks ───────────────────────────────────────────
+networks:
+  claude-network:
+    driver: bridge
+  ollama_default:  # External network where Ollama runs
+    external: true
+    name: ollama_default

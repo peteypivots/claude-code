@@ -255,6 +255,12 @@ import {
   type RetryContext,
   withRetry,
 } from './withRetry.js'
+import {
+  shouldUseProviderAbstraction,
+  streamFromLLMProvider,
+  shouldFallbackToAnthropicForProvider,
+  getQueryEngineProviderInfo,
+} from '../llm/queryEngineIntegration.js'
 
 // Define a type that represents valid JSON values
 type JsonValue = string | number | boolean | null | JsonObject | JsonArray
@@ -1819,21 +1825,64 @@ async function* queryModel(
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
         // since we handle tool input accumulation ourselves
         // biome-ignore lint/plugin: main conversation loop handles attribution separately
-        const result = await anthropic.beta.messages
-          .create(
-            { ...params, stream: true },
-            {
-              signal,
-              ...(clientRequestId && {
-                headers: { [CLIENT_REQUEST_ID_HEADER]: clientRequestId },
-              }),
-            },
-          )
-          .withResponse()
-        queryCheckpoint('query_response_headers_received')
-        streamRequestId = result.request_id
-        streamResponse = result.response
-        return result.data
+        
+        // Check if we should use the LLM provider abstraction (Ollama) instead of Anthropic
+        const useProviderAbstraction = await shouldUseProviderAbstraction()
+        
+        let resultStream: Stream<BetaRawMessageStreamEvent>
+        
+        if (useProviderAbstraction) {
+          try {
+            // Route through LLM provider abstraction (Ollama)
+            if (process.env.DEBUG_CLAUDE_PROVIDER) {
+              console.log('[QueryEngine] Using provider abstraction (Ollama)')
+            }
+            try {
+              const providerStream = await streamFromLLMProvider(params)
+              resultStream = providerStream as any
+              queryCheckpoint('query_response_headers_received')
+              // For provider requests, generate request ID on client side
+              streamRequestId = `provider-${randomUUID()}`
+              streamResponse = undefined as any
+            } catch (providerError) {
+              // If provider fails, check if we should fallback to Anthropic
+              const shouldFallback = await shouldFallbackToAnthropicForProvider()
+              if (shouldFallback) {
+                console.warn('[QueryEngine] Provider failed, falling back to Anthropic:', errorMessage(providerError))
+                // Fall through to Anthropic code below
+                resultStream = undefined as any
+              } else {
+                throw providerError
+              }
+            }
+          } catch (err) {
+            // Ensure fallback happens if provider abstraction throws
+            resultStream = undefined as any
+          }
+        } else {
+          resultStream = undefined as any
+        }
+        
+        // If we didn't get a stream from the provider, use Anthropic (primary or fallback)
+        if (!resultStream) {
+          const result = await anthropic.beta.messages
+            .create(
+              { ...params, stream: true },
+              {
+                signal,
+                ...(clientRequestId && {
+                  headers: { [CLIENT_REQUEST_ID_HEADER]: clientRequestId },
+                }),
+              },
+            )
+            .withResponse()
+          queryCheckpoint('query_response_headers_received')
+          streamRequestId = result.request_id
+          streamResponse = result.response
+          resultStream = result.data
+        }
+        
+        return resultStream
       },
       {
         model: options.model,
