@@ -71,14 +71,18 @@ export async function* wrapProviderStreamForQueryModel(
  * should either use SearXNG (WebSearchTool) or fall through to Anthropic.
  */
 export async function shouldUseProviderAbstraction(): Promise<boolean> {
-  // DISABLED: When local-first routing is active via queryModelWithRouting,
-  // this path creates duplicate Ollama requests. The main query loop already
-  // routes to Ollama via handleLocalAction(). Other callers (like WebSearchTool)
-  // should use their own local backends (SearXNG) or fall through to Anthropic.
-  // 
-  // To re-enable this path for non-main-loop callers, we'd need to coordinate
-  // with queryModelWithRouting to avoid the double-call issue.
+  // When local-first routing is active, the main query loop uses
+  // queryModelWithRouting (via deps.callModel) which handles Ollama routing.
+  // However, some callers (interactive REPL startup, etc.) still go through
+  // queryModelWithStreaming directly. If there's no Anthropic API key, we MUST
+  // route through Ollama to avoid the "No valid Anthropic API key" error.
   if (process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true') {
+    const anthropicKey = process.env.ANTHROPIC_API_KEY
+    if (!anthropicKey || anthropicKey.includes('YOUR_API_KEY')) {
+      // No Anthropic key — must use Ollama provider
+      return true;
+    }
+    // Has Anthropic key — skip provider to avoid duplicate Ollama calls
     return false;
   }
 

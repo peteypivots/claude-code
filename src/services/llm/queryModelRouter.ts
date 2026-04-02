@@ -880,6 +880,68 @@ async function* handleLocalAction(
       routerLog('Detected web search results in conversation, adding answer instruction')
     }
 
+    // ── Tool Loop Detection ──────────────────────────────────────────────
+    // Scan the last N assistant messages for consecutive calls to the same tool.
+    // If the model called the same tool 3+ times in a row, remove it from the
+    // tool list so the model is forced to synthesize an answer.
+    const LOOP_THRESHOLD = 2
+    let loopedToolName: string | null = null
+    let consecutiveCount = 0
+    let lastToolName: string | null = null
+
+    // Walk assistant messages in reverse order
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.type !== 'assistant') continue
+      const toolUses = m.message.content.filter((c: any) => c.type === 'tool_use')
+      if (toolUses.length !== 1) break // Only track single-tool turns
+      const name = (toolUses[0] as any).name
+      if (lastToolName === null) {
+        lastToolName = name
+        consecutiveCount = 1
+      } else if (name === lastToolName) {
+        consecutiveCount++
+      } else {
+        break
+      }
+    }
+
+    if (consecutiveCount >= LOOP_THRESHOLD && lastToolName) {
+      loopedToolName = lastToolName
+      routerLog(`🔄 TOOL LOOP DETECTED: "${loopedToolName}" called ${consecutiveCount} times consecutively`, 'warn')
+    }
+
+    // If looping, remove that tool and tell the model to answer
+    let effectiveTools = llmTools
+    if (loopedToolName && llmTools) {
+      effectiveTools = llmTools.filter((t: any) => {
+        const name = t.name || t.function?.name
+        return name !== loopedToolName
+      })
+      routerLog(`Removed looped tool "${loopedToolName}" from tool list (${llmTools.length} → ${effectiveTools.length})`, 'warn')
+      
+      // Extract the most recent tool result for this tool to help the model answer
+      let toolResultPreview = ''
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i]
+        if (m.type !== 'user') continue
+        const content = (m as any).message?.content
+        if (!Array.isArray(content)) continue
+        for (const c of content) {
+          if (c.type === 'tool_result') {
+            const resultText = typeof c.content === 'string' ? c.content : JSON.stringify(c.content)
+            if (resultText.length > 100) {
+              toolResultPreview = resultText.substring(0, 3000)
+              break
+            }
+          }
+        }
+        if (toolResultPreview) break
+      }
+      
+      systemPromptText += `\n\n⚠️ IMPORTANT: You have already called "${loopedToolName}" ${consecutiveCount} times and received its results. Do NOT attempt to call it again or any other tool. You MUST now answer the user's original question using the data below. Provide a clear, concise summary.\n\nData from ${loopedToolName}:\n${toolResultPreview}`
+    }
+
     // Stream from local model
     routerLog(`[STREAM] Starting stream from ${decision.model}...`, 'info')
     streamEventCount = 0 // Reset counter for new stream
@@ -888,7 +950,7 @@ async function* handleLocalAction(
       model: decision.model,
       messages: llmMessages,
       systemPrompt: systemPromptText,
-      tools: llmTools,
+      tools: effectiveTools,
       maxTokens: 4096,
     })
 
