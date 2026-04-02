@@ -170,8 +170,6 @@ export const WebSearchTool = buildTool({
     const provider = getAPIProvider()
     const model = getMainLoopModel()
 
-    console.error(`[WebSearchTool] isEnabled check: provider=${provider}, model=${model}, OLLAMA_BASE_URL=${process.env.OLLAMA_BASE_URL}, SEARXNG_URL=${process.env.SEARXNG_URL}`)
-
     // Enable for firstParty
     if (provider === 'firstParty') {
       return true
@@ -195,14 +193,11 @@ export const WebSearchTool = buildTool({
     // Enable for Ollama when SearXNG is configured
     if (process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true') {
       const searxngUrl = getSearxngUrl()
-      console.error(`[WebSearchTool] SearXNG URL: ${searxngUrl}`)
       if (searxngUrl) {
-        console.error('[WebSearchTool] Enabled via SearXNG backend')
         return true
       }
     }
 
-    console.error('[WebSearchTool] Not enabled - returning false')
     return false
   },
   get inputSchema(): InputSchema {

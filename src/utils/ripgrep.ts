@@ -7,7 +7,7 @@ import { logEvent } from 'src/services/analytics/index.js'
 import { fileURLToPath } from 'url'
 import { isInBundledMode } from './bundledMode.js'
 import { logForDebugging } from './debug.js'
-import { isEnvDefinedFalsy } from './envUtils.js'
+import { isEnvTruthy } from './envUtils.js'
 import { execFileNoThrow } from './execFileNoThrow.js'
 import { findExecutable } from './findExecutable.js'
 import { logError } from './log.js'
@@ -29,12 +29,14 @@ type RipgrepConfig = {
 }
 
 const getRipgrepConfig = memoize((): RipgrepConfig => {
-  const userWantsSystemRipgrep = isEnvDefinedFalsy(
+  const userForcesBuiltinRipgrep = isEnvTruthy(
     process.env.USE_BUILTIN_RIPGREP,
   )
 
-  // Try system ripgrep if user wants it
-  if (userWantsSystemRipgrep) {
+  // Prefer system ripgrep when it exists unless the env explicitly forces the
+  // bundled binary. This keeps container and local dev environments working
+  // even when vendor/ripgrep assets are absent from the source tree.
+  if (!userForcesBuiltinRipgrep) {
     const { cmd: systemPath } = findExecutable('rg', [])
     if (systemPath !== 'rg') {
       // SECURITY: Use command name 'rg' instead of systemPath to prevent PATH hijacking

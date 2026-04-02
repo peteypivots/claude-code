@@ -222,29 +222,52 @@ export function parseRoutingResponse(output: string): RoutingDecision | null {
   // Remove markdown code blocks if present
   let cleaned = output.replace(/```json\n?/g, '').replace(/```\n?/g, '')
   
-  // Try to extract JSON object
-  const jsonMatch = cleaned.match(/\{[^}]+\}/)
-  if (!jsonMatch) {
-    return null
-  }
-
+  // Try to extract JSON object (supports nested braces for robustness)
+  // First try: parse the whole string as JSON
+  let parsed: Record<string, unknown> | null = null
   try {
-    const parsed = JSON.parse(jsonMatch[0])
-    
-    // Validate required fields
-    if (!parsed.action || !['local', 'reason', 'escalate'].includes(parsed.action)) {
+    parsed = JSON.parse(cleaned.trim())
+  } catch {
+    // Second try: find the outermost {...} allowing nested braces
+    const start = cleaned.indexOf('{')
+    if (start === -1) return null
+    let depth = 0
+    let end = -1
+    for (let i = start; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') depth++
+      else if (cleaned[i] === '}') { depth--; if (depth === 0) { end = i; break } }
+    }
+    if (end === -1) return null
+    try {
+      parsed = JSON.parse(cleaned.slice(start, end + 1))
+    } catch {
       return null
     }
+  }
+  
+  if (!parsed) return null
 
-    return {
-      action: parsed.action,
-      model: parsed.model || getDefaultModel(parsed.action),
-      reasoning: parsed.reasoning || 'No reasoning provided',
-      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
-      suggestedTool: parsed.suggestedTool || undefined,
-    }
-  } catch {
+  // Validate required fields
+  if (!parsed.action) {
     return null
+  }
+  
+  let action = parsed.action as string
+  let suggestedTool = (parsed.suggestedTool as string) || undefined
+  
+  // If the model returned a tool name as the action (e.g. "WebSearch", "Read", "Bash"),
+  // treat it as "local" with that tool as the suggestedTool
+  if (!['local', 'reason', 'escalate'].includes(action)) {
+    suggestedTool = suggestedTool || action
+    action = 'local'
+  }
+
+  return {
+    action: action as 'local' | 'reason' | 'escalate',
+    model: (parsed.model as string) || getDefaultModel(action as 'local' | 'reason' | 'escalate'),
+    reasoning: (parsed.reasoning as string) || 'No reasoning provided',
+    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
+    suggestedTool,
   }
 }
 

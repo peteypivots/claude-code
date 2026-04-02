@@ -30,8 +30,10 @@ export function startCapturingEarlyInput(): void {
   // Only capture in interactive mode: stdin must be a TTY, and we must not
   // be in print mode. Raw mode disables ISIG (terminal Ctrl+C → SIGINT),
   // which would make -p uninterruptible.
+  const hasInteractiveTty = process.stdin.isTTY || process.stdout.isTTY
+
   if (
-    !process.stdin.isTTY ||
+    !hasInteractiveTty ||
     isCapturing ||
     process.argv.includes('-p') ||
     process.argv.includes('--print')
@@ -46,6 +48,9 @@ export function startCapturingEarlyInput(): void {
   // This ensures compatibility with how the REPL will handle stdin later
   try {
     process.stdin.setEncoding('utf8')
+    if (!process.stdin.isTTY && process.stdout.isTTY) {
+      process.stdin.isTTY = true
+    }
     process.stdin.setRawMode(true)
     process.stdin.ref()
 

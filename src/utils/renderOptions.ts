@@ -53,6 +53,16 @@ function getStdinOverride(): ReadStream | undefined {
     cachedStdinOverride = ttyStream
     return cachedStdinOverride
   } catch (err) {
+    // Docker exec and some Bun environments can misreport stdin.isTTY even
+    // when the session is interactive. If stdout is a TTY, preserve
+    // interactivity by reusing stdin and forcing the TTY bit.
+    if (process.stdout.isTTY) {
+      const stdin = process.stdin as ReadStream
+      stdin.isTTY = true
+      cachedStdinOverride = stdin
+      return cachedStdinOverride
+    }
+
     logError(err as Error)
     cachedStdinOverride = undefined
     return undefined

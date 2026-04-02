@@ -310,9 +310,9 @@ function getStaticRoutingDecision(context: RoutingContext): RoutingDecision {
 
   if (context.toolCount > 20) {
     return {
-      action: 'escalate',
-      model: 'claude-sonnet-4-20250514',
-      reasoning: 'Many tools require stronger orchestration',
+      action: 'local',
+      model: process.env.LOCAL_MODEL || 'qwen2.5:7b-instruct',
+      reasoning: 'Many tools available, using local model',
       confidence: 0.65,
     }
   }

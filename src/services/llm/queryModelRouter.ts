@@ -6,10 +6,73 @@
  */
 
 import { randomUUID, type UUID } from 'crypto'
-import { appendFileSync, mkdirSync, writeFileSync } from 'fs'
-import { dirname } from 'path'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { dirname, join } from 'path'
+import { isEnvTruthy } from '../../utils/envUtils.js'
 
 const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
+
+// ============================================================================
+// Local System Prompt Cache (canopy-managed)
+// ============================================================================
+
+let _localPromptCache: string | null | undefined = undefined // undefined = not yet loaded
+
+/**
+ * Read the local model system prompt from canopy cache.
+ * Populated by: cn render local-system > .claude/.local-prompt-cache
+ * Falls back to a compact built-in prompt if cache is missing.
+ */
+function getLocalSystemPrompt(): string {
+  if (_localPromptCache !== undefined) {
+    return _localPromptCache || LOCAL_PROMPT_FALLBACK
+  }
+
+  const candidatePaths = [
+    join(process.cwd(), '.claude', '.local-prompt-cache'),
+    '/app/.claude/.local-prompt-cache',
+  ]
+
+  for (const p of candidatePaths) {
+    if (!existsSync(p)) continue
+    try {
+      const content = readFileSync(p, 'utf-8')
+      if (content.length > 50) {
+        _localPromptCache = content
+        routerLog(`Loaded local system prompt from cache: ${p} (${content.length} chars)`, 'success')
+        return content
+      }
+    } catch {}
+  }
+
+  _localPromptCache = null
+  routerLog('No local prompt cache found, using built-in fallback', 'warn')
+  return LOCAL_PROMPT_FALLBACK
+}
+
+/**
+ * Strip <system-reminder> blocks from text content.
+ * The CLI framework injects these into user messages with the full Claude prompt,
+ * CLAUDE.md, memory instructions, and git status — thousands of tokens that
+ * overwhelm the local model. Our canopy system prompt already covers essentials.
+ */
+function stripSystemReminders(text: string): string {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+}
+
+const LOCAL_PROMPT_FALLBACK = `You are Claude Code, an AI coding assistant running locally. Use the available tools to help the user.
+
+## Tool Usage
+Use tools to accomplish tasks. Do not guess when a tool can provide accurate information.
+- Weather, news, current events → WebSearchTool
+- Read a file → FileReadTool / ReadTool
+- Edit a file → FileEditTool / FileWriteTool
+- Run a command → BashTool
+- Explore codebase → ListFilesTool, GlobTool, GrepTool
+- Understand source → mcp tools (get_tool_source, read_source_file, search_source)
+
+After receiving tool results, synthesize into a clear answer. Never fabricate results.
+Be concise and direct. Use markdown for code blocks.`
 
 // ANSI color codes for terminal output
 const COLORS = {
@@ -364,13 +427,15 @@ function convertMessagesToLLM(messages: Message[]): LLMRequestOptions['messages'
       if (m.type === 'user') {
         const content = m.message.content
         if (typeof content === 'string') {
-          return { role: 'user' as const, content }
+          return { role: 'user' as const, content: stripSystemReminders(content) }
         }
         
         // Convert content blocks
         const converted: MessageContent[] = content.map(c => {
           if (c.type === 'text') {
-            return { type: 'text' as const, text: c.text }
+            const cleaned = stripSystemReminders(c.text)
+            // Skip empty text blocks (fully stripped system-reminder)
+            return { type: 'text' as const, text: cleaned }
           }
           if (c.type === 'tool_result') {
             return {
@@ -380,7 +445,7 @@ function convertMessagesToLLM(messages: Message[]): LLMRequestOptions['messages'
             }
           }
           return { type: 'text' as const, text: JSON.stringify(c) }
-        })
+        }).filter(c => !(c.type === 'text' && !c.text))
         
         return { role: 'user' as const, content: converted }
       } else {
@@ -768,16 +833,22 @@ async function* handleLocalAction(
       }
     }
 
-    // Extract system prompt text
-    let systemPromptText = typeof systemPrompt === 'string' 
-      ? systemPrompt 
-      : Array.isArray(systemPrompt)
-        ? systemPrompt.map(p => typeof p === 'string' ? p : (p as { text?: string }).text || '').join('\n')
-        : (systemPrompt as { text?: string }).text || ''
+    // Use compact local system prompt instead of the full 29KB Claude prompt
+    let systemPromptText = getLocalSystemPrompt()
+
+    routerLog(`SystemPrompt for local model: length=${systemPromptText.length} (canopy-managed)`)
 
     // If the orchestrator suggested a tool, hint the model to use it
     if (decision.suggestedTool) {
-      systemPromptText += `\n\nIMPORTANT: For this query, you should use the "${decision.suggestedTool}" tool. Do NOT answer from memory — invoke the tool first.`
+      // In coordinator mode, the model only has Agent + TaskStop.
+      // Rewrite the hint to delegate via Agent instead of calling the tool directly.
+      const isCoordinator = isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
+      if (isCoordinator) {
+        systemPromptText += `\n\nIMPORTANT: For this query, you MUST use the "Agent" tool to delegate the task to a worker agent. The worker has access to "${decision.suggestedTool}" and other tools. Create a detailed prompt describing what the worker should do. Do NOT answer from memory — delegate via Agent first.`
+      } else {
+        systemPromptText += `\n\nIMPORTANT: For this query, you should use the "${decision.suggestedTool}" tool. Do NOT answer from memory — invoke the tool first.`
+      }
+      routerLog(`Added suggestedTool hint for: ${decision.suggestedTool}`)
     }
 
     // Check if we already have web search results in the conversation - if so, tell the model to answer

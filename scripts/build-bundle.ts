@@ -256,6 +256,8 @@ const buildOptions: esbuild.BuildOptions = {
     'MACRO.ISSUES_EXPLAINER': JSON.stringify(
       'report issues at https://github.com/anthropics/claude-code/issues'
     ),
+    'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
+    'MACRO.FEEDBACK_CHANNEL': JSON.stringify('external'),
     'process.env.USER_TYPE': '"external"',
     'process.env.NODE_ENV': minify ? '"production"' : '"development"',
   },

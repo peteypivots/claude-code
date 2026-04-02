@@ -49,6 +49,11 @@ export function resetSyncCache(): void {
 export function isRemoteManagedSettingsEligible(): boolean {
   if (cached !== undefined) return cached
 
+  // LOCAL_FIRST mode uses Ollama only - skip Anthropic settings endpoint entirely
+  if (process.env.LOCAL_FIRST === 'true') {
+    return (cached = setEligibility(false))
+  }
+
   // 3p provider users should not hit the settings endpoint
   if (getAPIProvider() !== 'firstParty') {
     return (cached = setEligibility(false))

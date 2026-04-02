@@ -71,7 +71,13 @@ export function mergeAndFilterTools(
 
   if (feature('COORDINATOR_MODE') && coordinatorModeModule) {
     if (coordinatorModeModule.isCoordinatorMode()) {
-      return applyCoordinatorToolFilter(tools)
+      // When using a local model (Ollama), skip coordinator filtering.
+      // Local models are trained on direct tool use, not agent delegation.
+      // The coordinator filter (Agent + TaskStop only) is designed for Claude.
+      const isLocalFirst = process.env.LOCAL_FIRST === 'true'
+      if (!isLocalFirst) {
+        return applyCoordinatorToolFilter(tools)
+      }
     }
   }
 

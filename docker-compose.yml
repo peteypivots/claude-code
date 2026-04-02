@@ -34,6 +34,12 @@ services:
       LLM_SECONDARY_PROVIDER: ${LLM_SECONDARY_PROVIDER:-anthropic}
       LLM_ENABLE_FALLBACK: ${LLM_ENABLE_FALLBACK:-true}
       LLM_LOG_PROVIDER: ${LLM_LOG_PROVIDER:-false}
+      CLAUDE_CODE_COORDINATOR_MODE: ${CLAUDE_CODE_COORDINATOR_MODE:-0}
+      
+      # ── Compound AI System (enables local-first routing) ──
+      LOCAL_FIRST: ${LOCAL_FIRST:-false}
+      USE_LLM_ORCHESTRATOR: ${USE_LLM_ORCHESTRATOR:-false}
+      ROUTER_CACHE_TTL_MS: ${ROUTER_CACHE_TTL_MS:-300000}
       ROUTER_VERBOSE: "true"
       POOL_VERBOSE: "true"
       
@@ -67,6 +73,7 @@ services:
       OLLAMA_DEBUG_FULL_REQUEST: ${OLLAMA_DEBUG_FULL_REQUEST:-true}
       OLLAMA_DEBUG_LOG_FILE: ${OLLAMA_DEBUG_LOG_FILE:-/data/logs/router-debug.log}
       OLLAMA_DEBUG_UI_LOG_FILE: ${OLLAMA_DEBUG_UI_LOG_FILE:-/data/logs/claude-debug.log}
+      OLLAMA_NATIVE_TOOLS: ${OLLAMA_NATIVE_TOOLS:-false}
       OLLAMA_MODEL_SONNET: ${OLLAMA_MODEL_SONNET:-}
       OLLAMA_MODEL_HAIKU: ${OLLAMA_MODEL_HAIKU:-}
     

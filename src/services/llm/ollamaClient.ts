@@ -149,6 +149,20 @@ function mapModelToOllama(model: string): string {
 function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array<{ name: string; input: Record<string, unknown> }> {
   const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = []
   
+  // Strip type annotations from argument keys (e.g., "file_path: str" -> "file_path")
+  // Some fine-tuned models include Python-style type hints in tool call arguments
+  const stripTypeAnnotations = (input: Record<string, unknown>): Record<string, unknown> => {
+    const cleaned: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(input)) {
+      const cleanKey = key.replace(/:\s*(str|int|float|bool|list|dict|any|string|number|boolean|array|object)\s*$/i, '').trim()
+      if (cleanKey !== key) {
+        ollamaLog(`Stripped type annotation: "${key}" -> "${cleanKey}"`)
+      }
+      cleaned[cleanKey] = value
+    }
+    return cleaned
+  }
+  
   // Normalize tool name for fuzzy matching: remove separators, lowercase
   // e.g., "web-search" -> "websearch", "WebSearch" -> "websearch", "web_search" -> "websearch"
   const normalizeToolName = (name: string): string => 
@@ -202,7 +216,7 @@ function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array
     }
     
     try {
-      const input = JSON.parse(argsJson)
+      const input = stripTypeAnnotations(JSON.parse(argsJson))
       toolCalls.push({ name: toolName, input })
       ollamaLog(`Parsed text tool call: ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
     } catch (e) {
@@ -231,7 +245,7 @@ function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array
     }
     
     try {
-      const input = JSON.parse(argsJson)
+      const input = stripTypeAnnotations(JSON.parse(argsJson))
       toolCalls.push({ name: toolName, input })
       ollamaLog(`Parsed XML tool call: <${xmlTagName}> -> ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
     } catch (e) {
@@ -258,7 +272,7 @@ function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array
       
       for (const call of calls) {
         const inputName = call.name
-        const input = call.arguments || {}
+        const input = stripTypeAnnotations(call.arguments || {})
         
         // Fuzzy resolve tool name
         const toolName = allowedToolNames 
@@ -326,6 +340,22 @@ function convertToolsToOllamaFormat(tools: AnthropicTool[]): OllamaTool[] {
   }))
 }
 
+function shouldUseNativeTools(model: string, hasTools: boolean): boolean {
+  if (!hasTools) {
+    return false
+  }
+
+  const nativeToolsSetting = process.env.OLLAMA_NATIVE_TOOLS
+  if (nativeToolsSetting === 'true') {
+    return true
+  }
+  if (nativeToolsSetting === 'false') {
+    return false
+  }
+
+  return supportsNativeTools(model)
+}
+
 const DEFAULT_OLLAMA_CONFIG: OllamaConfig = {
   baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
   timeout: parseInt(process.env.OLLAMA_TIMEOUT || '120000', 10),
@@ -365,7 +395,6 @@ export class OllamaProvider implements ILLMProvider {
 
       const response = await fetch(`${this.config.baseUrl}/api/tags`, {
         signal: controller.signal,
-        timeout: 3000,
       })
 
       clearTimeout(timeoutId)
@@ -385,6 +414,7 @@ export class OllamaProvider implements ILLMProvider {
     
     // Convert tools to Ollama format if provided
     const ollamaTools = options.tools ? convertToolsToOllamaFormat(options.tools as AnthropicTool[]) : undefined
+    const useNativeTools = shouldUseNativeTools(ollamaModel, !!ollamaTools?.length)
 
     // Only override num_ctx if explicitly set - otherwise use model's Modelfile default
     const ollamaOptions: Record<string, unknown> = {
@@ -408,8 +438,8 @@ export class OllamaProvider implements ILLMProvider {
       }),
     }
     
-    // Add tools if provided and model supports them
-    if (ollamaTools && ollamaTools.length > 0) {
+    // Add tools when native tool calling is enabled for this model.
+    if (useNativeTools && ollamaTools && ollamaTools.length > 0) {
       requestBody.tools = ollamaTools
     }
 
@@ -427,7 +457,6 @@ export class OllamaProvider implements ILLMProvider {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
-          timeout: this.config.timeout,
         })
 
         clearTimeout(timeoutId)
@@ -581,8 +610,7 @@ export class OllamaProvider implements ILLMProvider {
       streamOptions.num_ctx = parseInt(process.env.OLLAMA_NUM_CTX, 10)
     }
 
-    // Check if native tool calling is enabled (default: false for text-based tool models)
-    const useNativeTools = process.env.OLLAMA_NATIVE_TOOLS === 'true'
+    const useNativeTools = shouldUseNativeTools(ollamaModel, !!ollamaTools?.length)
 
     const requestBody: Record<string, unknown> = {
       model: ollamaModel,
@@ -598,15 +626,14 @@ export class OllamaProvider implements ILLMProvider {
       }),
     }
     
-    // Only add tools if native tool calling is explicitly enabled
-    // Text-based tool models (like claude-explorer) output <tool_call> tags as text
-    // which we parse instead of using Ollama's native tool API
+    // Auto-enable native tools for known-capable models, allow explicit env override,
+    // and keep text parsing as the fallback path when tools are not sent.
     if (useNativeTools && ollamaTools && ollamaTools.length > 0) {
       requestBody.tools = ollamaTools
       ollamaLog(`[REQ-${requestId}] stream() sending ${ollamaTools.length} tools to model ${ollamaModel} (native mode)`)
       ollamaLog(`[REQ-${requestId}] First tool: ${JSON.stringify(ollamaTools[0]).substring(0, 300)}`)
     } else if (ollamaTools && ollamaTools.length > 0) {
-      ollamaLog(`[REQ-${requestId}] stream() ${ollamaTools.length} tools available (text-based parsing mode)`)
+      ollamaLog(`[REQ-${requestId}] stream() ${ollamaTools.length} tools available (text-based parsing mode)`, 'debug')
     } else {
       ollamaLog(`[REQ-${requestId}] stream() NO tools sent to model ${ollamaModel}`)
       if (process.env.OLLAMA_DEBUG_STACKS === 'true') {
@@ -641,7 +668,6 @@ export class OllamaProvider implements ILLMProvider {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(requestBody),
           signal: controller.signal,
-          timeout: this.config.timeout,
         })
         ollamaLog(`[REQ-${requestId}] Fetch response received: status=${response.status}`, 'debug')
 

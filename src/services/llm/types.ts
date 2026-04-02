@@ -56,6 +56,7 @@ export interface LLMStreamEvent {
     text?: string
     id?: string
     name?: string
+    input?: unknown
   }
   delta?: {
     type: string
