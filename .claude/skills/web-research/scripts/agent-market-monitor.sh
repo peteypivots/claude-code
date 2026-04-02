@@ -8,6 +8,9 @@
 # Enable parallel workers (N concurrent agent invocations per batch):
 #   PARALLEL_WORKERS=3 ./agent-market-monitor.sh
 #
+# Use orchestrator mode (spawns proper subagents via AgentTool):
+#   ORCHESTRATOR_MODE=1 ./agent-market-monitor.sh
+#
 # Combine both for maximum throughput:
 #   INSTANCE=sports PARALLEL_WORKERS=2 ./agent-market-monitor.sh &
 #   INSTANCE=markets PARALLEL_WORKERS=2 ./agent-market-monitor.sh &
@@ -42,6 +45,12 @@ QUERY_FILE="${QUERY_FILE:-/app/.claude/skills/web-research/scripts/monitor-queri
 # Each worker is a separate agent invocation; distributes queries round-robin
 # WARNING: High values may overwhelm Ollama; recommended 2-4 for local models
 PARALLEL_WORKERS=${PARALLEL_WORKERS:-1}
+
+# Orchestrator mode — uses the research-batch-orchestrator agent to spawn
+# proper Claude Code subagents via AgentTool. This is the cleanest approach
+# for parallel research as it uses the native agent spawning mechanism.
+# Set ORCHESTRATOR_MODE=1 to enable. Overrides PARALLEL_WORKERS.
+ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-0}
 
 # Default queries embedded — used only if query file doesn't exist
 DEFAULT_QUERIES=(
@@ -452,8 +461,71 @@ run_parallel_queries() {
   fi
 }
 
+# Run queries via the research-batch-orchestrator agent
+# This spawns proper Claude Code subagents via AgentTool for parallel research
+run_orchestrator_batch() {
+  local -n queries_ref=$1
+  local total=${#queries_ref[@]}
+
+  echo "[$(date)] Orchestrator mode: sending $total queries to batch orchestrator" >> "$LOG"
+
+  # Build the query list as a prompt
+  local query_list=""
+  for q in "${queries_ref[@]}"; do
+    if [ -n "$q" ]; then
+      query_list="${query_list}
+- ${q}"
+    fi
+  done
+
+  local prompt="Research these topics in parallel, spawning one web-researcher worker per topic:
+${query_list}
+
+After all workers complete, report:
+1. Total new findings stored
+2. Brief summary of each topic's findings
+3. Any failures or empty results"
+
+  echo "[$(date)]   Launching orchestrator..." >> "$LOG"
+
+  local start_ms
+  start_ms=$(date +%s%3N)
+
+  local result
+  result=$(LOCAL_SYSTEM_PROMPT="You are a research batch orchestrator. Spawn web-researcher workers in parallel." \
+    LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
+    bun /app/cli.mjs \
+      --agent research-batch-orchestrator \
+      --mcp-config /tmp/empty-mcp.json \
+      --dangerously-skip-permissions \
+      --output-format json \
+      -p "$prompt" 2>/dev/null)
+
+  local end_ms
+  end_ms=$(date +%s%3N)
+  local elapsed=$((end_ms - start_ms))
+
+  # Extract JSON result
+  local json_line
+  json_line=$(echo "$result" | grep '^{"type":"result"' | tail -1)
+  local answer
+  answer=$(echo "$json_line" | jq -r '.result // "no result"' 2>/dev/null || echo "parse error")
+  local turns
+  turns=$(echo "$json_line" | jq -r '.num_turns // 0' 2>/dev/null || echo "?")
+
+  echo "[$(date)]   Orchestrator complete: ${elapsed}ms, ${turns} turns" >> "$LOG"
+  echo "[$(date)]   Result: ${answer:0:300}" >> "$LOG"
+}
+
 echo "=== Agent Market Monitor Started ===" >> "$LOG"
-echo "[$(date)] Cycle delay: ${CYCLE_DELAY}s | Queries/cycle: ${QUERIES_PER_CYCLE} | Workers: ${PARALLEL_WORKERS}" >> "$LOG"
+if [ "$ORCHESTRATOR_MODE" = "1" ]; then
+  echo "[$(date)] Mode: ORCHESTRATOR (spawns subagents via AgentTool)" >> "$LOG"
+elif [ "$PARALLEL_WORKERS" -gt 1 ]; then
+  echo "[$(date)] Mode: PARALLEL_WORKERS=$PARALLEL_WORKERS (bash backgrounding)" >> "$LOG"
+else
+  echo "[$(date)] Mode: SEQUENTIAL" >> "$LOG"
+fi
+echo "[$(date)] Cycle delay: ${CYCLE_DELAY}s | Queries/cycle: ${QUERIES_PER_CYCLE}" >> "$LOG"
 
 cycle=0
 while true; do
@@ -494,10 +566,13 @@ while true; do
     done
   fi
 
-  echo "[$(date)] Running ${#selected[@]} queries this cycle (workers: $PARALLEL_WORKERS)" >> "$LOG"
+  echo "[$(date)] Running ${#selected[@]} queries this cycle" >> "$LOG"
 
-  if [ "$PARALLEL_WORKERS" -gt 1 ]; then
-    # Parallel mode: distribute across workers
+  if [ "$ORCHESTRATOR_MODE" = "1" ]; then
+    # Orchestrator mode: use research-batch-orchestrator to spawn proper subagents
+    run_orchestrator_batch selected
+  elif [ "$PARALLEL_WORKERS" -gt 1 ]; then
+    # Parallel mode: distribute across workers via bash backgrounding
     run_parallel_queries selected "$PARALLEL_WORKERS"
   else
     # Sequential mode (original behavior)
