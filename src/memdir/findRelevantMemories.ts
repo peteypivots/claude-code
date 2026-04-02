@@ -3,12 +3,39 @@ import { logForDebugging } from '../utils/debug.js'
 import { errorMessage } from '../utils/errors.js'
 import { getDefaultSonnetModel } from '../utils/model/model.js'
 import { sideQuery } from '../utils/sideQuery.js'
+import { sideQuery as sideQueryLocal } from '../services/llm/sideQueryProvider.js'
 import { jsonParse } from '../utils/slowOperations.js'
 import {
   formatMemoryManifest,
   type MemoryHeader,
   scanMemoryFiles,
 } from './memoryScan.js'
+
+/** Check if we're in local-first mode (Ollama) */
+function isLocalFirst(): boolean {
+  return !!(process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true')
+}
+
+/**
+ * Extract JSON from LLM text that may be wrapped in markdown fences or preamble.
+ * Local models often return ```json\n{...}\n``` instead of raw JSON.
+ */
+function extractJson(text: string): string {
+  // Try raw first
+  const trimmed = text.trim()
+  if (trimmed.startsWith('{')) return trimmed
+
+  // Strip markdown fences: ```json ... ``` or ``` ... ```
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/)
+  if (fenceMatch) return fenceMatch[1].trim()
+
+  // Last resort: find first { to last }
+  const first = trimmed.indexOf('{')
+  const last = trimmed.lastIndexOf('}')
+  if (first !== -1 && last > first) return trimmed.slice(first, last + 1)
+
+  return trimmed
+}
 
 export type RelevantMemory = {
   path: string
@@ -94,7 +121,27 @@ async function selectRelevantMemories(
       ? `\n\nRecently used tools: ${recentTools.join(', ')}`
       : ''
 
+  const userContent = `Query: ${query}\n\nAvailable memories:\n${manifest}${toolsSection}`
+
   try {
+    // In local-first mode, use Ollama-aware sideQueryProvider
+    if (isLocalFirst()) {
+      const localResult = await sideQueryLocal({
+        prompt: userContent,
+        systemPrompt: SELECT_MEMORIES_SYSTEM_PROMPT,
+        maxTokens: 256,
+        temperature: 0,
+      })
+
+      // Parse JSON from the local provider's text response
+      const parsed: { selected_memories: string[] } = jsonParse(extractJson(localResult.text))
+      logForDebugging(
+        `[memdir] Local memory recall selected ${parsed.selected_memories.length} memories via ${localResult.provider}/${localResult.model}`,
+      )
+      return parsed.selected_memories.filter(f => validFilenames.has(f))
+    }
+
+    // Default: Anthropic sideQuery (original path)
     const result = await sideQuery({
       model: getDefaultSonnetModel(),
       system: SELECT_MEMORIES_SYSTEM_PROMPT,

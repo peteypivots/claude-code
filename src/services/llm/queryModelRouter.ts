@@ -51,13 +51,36 @@ function getLocalSystemPrompt(): string {
 }
 
 /**
- * Strip <system-reminder> blocks from text content.
+ * Strip <system-reminder> blocks from text content, but preserve memory-related
+ * sections (claudeMd, memory) that Ollama agents need for context.
+ * 
  * The CLI framework injects these into user messages with the full Claude prompt,
  * CLAUDE.md, memory instructions, and git status — thousands of tokens that
- * overwhelm the local model. Our canopy system prompt already covers essentials.
+ * overwhelm the local model. Our canopy system prompt already covers essentials,
+ * but memory content is unique per-project and must be preserved.
  */
 function stripSystemReminders(text: string): string {
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+  return text.replace(/<system-reminder>([\s\S]*?)<\/system-reminder>/g, (_match, inner: string) => {
+    // Extract memory/claudeMd sections from the context block
+    const preserved: string[] = []
+    
+    // Match "# claudeMd\n..." or "# memory\n..." sections within the context
+    // Each section starts with "# <key>\n" and runs until the next "# <key>\n" or end
+    const sectionRegex = /^# (claudeMd|memory|currentDate)\n([\s\S]*?)(?=^# |\s*$)/gm
+    let sectionMatch
+    while ((sectionMatch = sectionRegex.exec(inner)) !== null) {
+      const sectionName = sectionMatch[1]
+      const sectionContent = sectionMatch[2]?.trim()
+      if (sectionContent) {
+        preserved.push(`[${sectionName}]\n${sectionContent}`)
+      }
+    }
+    
+    if (preserved.length > 0) {
+      return preserved.join('\n\n')
+    }
+    return ''
+  }).trim()
 }
 
 const LOCAL_PROMPT_FALLBACK = `You are Claude Code, an AI coding assistant running locally. Use the available tools to help the user.

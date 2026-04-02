@@ -29,6 +29,10 @@ services:
       # ── SearXNG Web Search (for local models) ──────────
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
       
+      # ── LanceDB Vector Store (research memory + dedup) ──
+      LANCEDB_URI: ${LANCEDB_URI:-http://lancedb-api:8000}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      
       # ── LLM Provider Selection ─────────────────────────
       LLM_PRIMARY_PROVIDER: ${LLM_PRIMARY_PROVIDER:-ollama}
       LLM_SECONDARY_PROVIDER: ${LLM_SECONDARY_PROVIDER:-anthropic}
@@ -44,10 +48,10 @@ services:
       POOL_VERBOSE: "true"
       
       # ── Model Configuration (from .env) ────────────────
-      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b-v3}
+      ORCHESTRATOR_MODEL: ${ORCHESTRATOR_MODEL:-claude-explorer:4b-v7}
       LOCAL_MODEL: ${LOCAL_MODEL:-qwen2.5:14b-instruct}
       REASONING_MODEL: ${REASONING_MODEL:-deepseek-r1:7b}
-      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v3}
+      SIDE_QUERY_OLLAMA_MODEL: ${SIDE_QUERY_OLLAMA_MODEL:-claude-explorer:4b-v7}
       DREAM_MODEL: ${DREAM_MODEL:-qwen2.5:7b-instruct}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-}
       OLLAMA_MODEL_OPUS: ${OLLAMA_MODEL_OPUS:-}
@@ -126,6 +130,7 @@ services:
     networks:
       - claude-network
       - ollama_default  # Connect to Ollama's network for direct access
+      - lancedb-network  # Connect to LanceDB for research memory
     
     # ── Port Mappings ──────────────────────────────────────
     ports:
@@ -163,3 +168,6 @@ networks:
   ollama_default:  # External network where Ollama runs
     external: true
     name: ollama_default
+  lancedb-network:  # External network where LanceDB runs
+    external: true
+    name: lancedb-network
