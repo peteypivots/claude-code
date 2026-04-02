@@ -566,12 +566,17 @@ function convertToBetaContent(content: MessageContent[]): BetaContentBlock[] {
 }
 
 /**
- * Create AssistantMessage from LLM response
+ * Create AssistantMessage from LLM response, with optional training metadata.
  */
 function createAssistantMessage(
   content: MessageContent[],
   model: string,
   usage: { inputTokens: number; outputTokens: number },
+  trainingMeta?: {
+    routingDecision?: 'local' | 'reason' | 'escalate'
+    routingConfidence?: number
+    latencyMs?: number
+  },
 ): AssistantMessage {
   const betaContent = convertToBetaContent(content)
   const hasToolUse = content.some(c => c.type === 'tool_use')
@@ -608,6 +613,10 @@ function createAssistantMessage(
     uuid: randomUUID() as UUID,
     timestamp: new Date().toISOString(),
     message: betaMessage,
+    modelUsed: model,
+    routingDecision: trainingMeta?.routingDecision,
+    routingConfidence: trainingMeta?.routingConfidence,
+    latencyMs: trainingMeta?.latencyMs,
   }
 }
 
@@ -699,6 +708,8 @@ export interface QueryModelParams {
  * - 'reason' → deepseek-r1:7b for reasoning tasks
  * - 'escalate' → Claude for complex/creative tasks
  */
+import { retrieveSimilarExamples, formatRAGContext } from './trainingRAG.js'
+
 export async function* queryModelWithRouting(
   params: QueryModelParams,
   config: RouterConfig = DEFAULT_CONFIG,
@@ -720,6 +731,26 @@ export async function* queryModelWithRouting(
     const toolNames = tools.slice(0, 5).map(t => t.name).join(', ')
     routerLog(`First 5 tools: ${toolNames}${tools.length > 5 ? '...' : ''}`, 'debug')
   }
+
+  // ── RAG: retrieve similar high-quality examples ─────────
+  const fullUserQuery = lastUserMsg?.type === 'user'
+    ? (typeof lastUserMsg.message?.content === 'string'
+        ? lastUserMsg.message.content
+        : '[complex content]')
+    : ''
+  const ragExamples = await retrieveSimilarExamples(fullUserQuery)
+  const ragContext = formatRAGContext(ragExamples)
+  if (ragExamples.length > 0) {
+    routerLog(`📚 RAG: retrieved ${ragExamples.length} similar examples (quality: ${ragExamples.map(e => e.quality.toFixed(2)).join(', ')})`, 'info')
+  }
+
+  // Augment system prompt with RAG context if available
+  const augmentedParams = ragContext
+    ? { ...params, _ragContext: ragContext }
+    : params
+
+  // Track start time for latency measurement
+  const routingStartTime = Date.now()
 
   // Get routing decision (async - may call orchestrator)
   let decision = await getRoutingDecisionAsync(messages, tools, config)
@@ -753,13 +784,13 @@ export async function* queryModelWithRouting(
   // Handle reasoning action - prepend reasoning step
   if (decision.action === 'reason') {
     routerLog(`Invoking reasoning model (DeepSeek-R1)...`, 'info')
-    yield* handleReasoningAction(params, decision, config)
+    yield* handleReasoningAction(augmentedParams, decision, config)
     return
   }
 
   // Handle local action
   routerLog(`Calling local model: ${decision.model}`, 'info')
-  yield* handleLocalAction(params, decision, config)
+  yield* handleLocalAction(augmentedParams, decision, config)
 }
 
 /**
@@ -807,7 +838,11 @@ async function* handleReasoningAction(
     // Create assistant message with reasoning
     const content: MessageContent[] = [{ type: 'text', text: reasoningText }]
     
-    yield createAssistantMessage(content, 'deepseek-r1:7b', reasoningResult.usage)
+    yield createAssistantMessage(content, 'deepseek-r1:7b', reasoningResult.usage, {
+      routingDecision: 'reason',
+      routingConfidence: decision.confidence,
+      latencyMs: reasoningResult.durationMs,
+    })
     recordLocalCall(reasoningResult.usage.inputTokens + reasoningResult.usage.outputTokens)
 
   } catch (error) {
@@ -858,6 +893,13 @@ async function* handleLocalAction(
 
     // Use compact local system prompt instead of the full 29KB Claude prompt
     let systemPromptText = getLocalSystemPrompt()
+
+    // Append RAG context from past high-quality examples if available
+    const ragCtx = (params as any)?._ragContext as string | undefined
+    if (ragCtx) {
+      systemPromptText += ragCtx
+      routerLog(`SystemPrompt augmented with RAG context (+${ragCtx.length} chars)`)
+    }
 
     routerLog(`SystemPrompt for local model: length=${systemPromptText.length} (canopy-managed)`)
 
@@ -968,6 +1010,7 @@ async function* handleLocalAction(
     // Stream from local model
     routerLog(`[STREAM] Starting stream from ${decision.model}...`, 'info')
     streamEventCount = 0 // Reset counter for new stream
+    const localStartTime = Date.now()
     
     const stream = provider.stream({
       model: decision.model,
@@ -1059,7 +1102,11 @@ async function* handleLocalAction(
 
     // Yield final assistant message
     routerLog(`[STREAM] Yielding final AssistantMessage`, 'success')
-    yield createAssistantMessage(accumulatedContent, decision.model, usage)
+    yield createAssistantMessage(accumulatedContent, decision.model, usage, {
+      routingDecision: decision.action as 'local' | 'reason' | 'escalate',
+      routingConfidence: decision.confidence,
+      latencyMs: Date.now() - localStartTime,
+    })
     recordLocalCall(usage.inputTokens + usage.outputTokens)
 
   } catch (error) {

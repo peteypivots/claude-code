@@ -472,6 +472,7 @@ export function createUserMessage({
   sourceToolAssistantUUID,
   permissionMode,
   origin,
+  toolOutcome,
 }: {
   content: string | ContentBlockParam[]
   isMeta?: true
@@ -498,6 +499,8 @@ export function createUserMessage({
   }
   // Provenance of this message. undefined = human (keyboard).
   origin?: MessageOrigin
+  // Training metadata: tool outcome classification
+  toolOutcome?: 'success' | 'partial' | 'error' | 'ignored'
 }): UserMessage {
   const m: UserMessage = {
     type: 'user',
@@ -518,6 +521,7 @@ export function createUserMessage({
     sourceToolAssistantUUID,
     permissionMode,
     origin,
+    toolOutcome,
   }
   return m
 }

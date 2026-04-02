@@ -405,6 +405,7 @@ export async function* runToolUse(
         ],
         toolUseResult: `Error: No such tool available: ${toolName}`,
         sourceToolAssistantUUID: assistantMessage.uuid,
+        toolOutcome: 'error',
       }),
     }
     return
@@ -484,6 +485,7 @@ export async function* runToolUse(
         ],
         toolUseResult: detailedError,
         sourceToolAssistantUUID: assistantMessage.uuid,
+        toolOutcome: 'error',
       }),
     }
   }
@@ -1463,6 +1465,7 @@ async function checkPermissionsAndCallTool(
               : toolUseResult,
           mcpMeta: toolUseContext.agentId ? undefined : mcpMeta,
           sourceToolAssistantUUID: assistantMessage.uuid,
+          toolOutcome: 'success',
         }),
         contextModifier: toolContextModifier
           ? {

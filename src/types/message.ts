@@ -86,6 +86,15 @@ export interface AssistantMessage {
   agentId?: string
   /** Caller info for debugging/display. */
   caller?: string
+  // --- Training metadata (Phase 1) ---
+  /** Which model actually generated this response. */
+  modelUsed?: string
+  /** Routing decision from orchestrator. */
+  routingDecision?: 'local' | 'reason' | 'escalate'
+  /** Orchestrator confidence in routing decision (0-1). */
+  routingConfidence?: number
+  /** Total response latency in milliseconds. */
+  latencyMs?: number
 }
 
 // ============================================================================
@@ -118,6 +127,11 @@ export interface UserMessage {
     direction?: PartialCompactDirection
   }
   origin?: MessageOrigin
+  // --- Training metadata (Phase 1) ---
+  /** Tool outcome classification for tool_result messages. */
+  toolOutcome?: 'success' | 'partial' | 'error' | 'ignored'
+  /** User feedback rating for this turn. */
+  feedback?: 'up' | 'down' | null
 }
 
 // ============================================================================
