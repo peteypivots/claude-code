@@ -121,8 +121,9 @@ function mapModelToOllama(model: string): string {
   
   // Tier-specific mappings using .env configuration
   if (normalizedModel.includes('opus')) {
-    // Opus = most capable, use largest available or REASONING_MODEL
-    return process.env.OLLAMA_MODEL_OPUS || process.env.REASONING_MODEL || 'qwen3.5:27b'
+    // Opus = most capable, use largest available or LOCAL_MODEL
+    // Note: Don't fall back to REASONING_MODEL here — it has its own identity/system prompt
+    return process.env.OLLAMA_MODEL_OPUS || process.env.LOCAL_MODEL || 'qwen3.5:27b'
   }
   if (normalizedModel.includes('sonnet')) {
     // Sonnet = balanced, use LOCAL_MODEL (worker model)
