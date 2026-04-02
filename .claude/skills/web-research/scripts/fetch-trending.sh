@@ -166,15 +166,57 @@ fetch_duckduckgo_topics() {
 # === Source: Horse Racing (UK/US racecards) ===
 fetch_horse_racing() {
   # Rotate between UK and US racing queries
-  local tracks=("Ascot" "Cheltenham" "Newmarket" "Churchill Downs" "Santa Anita" "Saratoga" "Del Mar" "Keeneland")
-  local types=("tips" "form guide" "predictions" "results" "entries")
+  local tracks=("Ascot" "Cheltenham" "Newmarket" "Churchill Downs" "Santa Anita" "Saratoga" "Del Mar" "Keeneland" "Gulfstream Park" "Belmont Park" "Aqueduct" "Oaklawn Park" "Pimlico" "Monmouth Park")
+  local types=("tips" "form guide" "predictions" "results" "entries" "picks" "handicapping")
   local track="${tracks[$((RANDOM % ${#tracks[@]}))]}"
   local type="${types[$((RANDOM % ${#types[@]}))]}"
   echo "$track horse racing $type today"
   
   # Also try racing news
-  local news=("Racing Post tips today" "Timeform horse racing analysis" "At The Races naps" "TVG picks today")
+  local news=("Racing Post tips today" "Timeform horse racing analysis" "At The Races naps" "TVG picks today" "DRF daily racing form picks" "Equibase entries results")
   echo "${news[$((RANDOM % ${#news[@]}))]}"
+}
+
+# === Source: NYRA (New York Racing Association) ===
+fetch_nyra() {
+  # NYRA tracks: Saratoga, Belmont Park, Aqueduct
+  local tracks=("Saratoga" "Belmont Park" "Aqueduct")
+  local queries=(
+    "NYRA bets picks today"
+    "NYRA entries scratches today"
+    "Saratoga race results today"
+    "Belmont Park thoroughbred racing today"
+    "Aqueduct horse racing picks"
+    "NYRA stakes races schedule"
+    "New York horse racing expert picks"
+  )
+  echo "${queries[$((RANDOM % ${#queries[@]}))]}"
+}
+
+# === Source: Thoroughbred Racing (Major events & data) ===
+fetch_thoroughbred() {
+  local events=(
+    "Kentucky Derby contenders odds"
+    "Preakness Stakes entries"
+    "Belmont Stakes predictions"
+    "Breeders Cup races odds"
+    "Triple Crown horse racing"
+    "Grade 1 stakes races today"
+    "thoroughbred racing bloodlines pedigree"
+  )
+  local data=(
+    "thoroughbred horse racing entries today"
+    "thoroughbred speed figures Beyer"
+    "Ragozin sheets thoroughbred"
+    "Thoro-Graph pace figures"
+    "thoroughbred workout reports"
+    "thoroughbred claiming races today"
+    "maiden special weight races today"
+    "allowance optional claiming today"
+  )
+  # Output one event and one data query
+  echo "${events[$((RANDOM % ${#events[@]}))]}"
+  echo "${data[$((RANDOM % ${#data[@]}))]}"
 }
 
 # === Source: Japanese Boat Racing (Kyotei) ===
@@ -266,6 +308,14 @@ main() {
   # Horse Racing
   echo "  Horse Racing..." >&2
   fetch_horse_racing > "$TMPDIR/horse_racing.txt" 2>/dev/null &
+  
+  # NYRA (New York Racing Association)
+  echo "  NYRA..." >&2
+  fetch_nyra > "$TMPDIR/nyra.txt" 2>/dev/null &
+  
+  # Thoroughbred Racing
+  echo "  Thoroughbred..." >&2
+  fetch_thoroughbred > "$TMPDIR/thoroughbred.txt" 2>/dev/null &
   
   # Japanese Boat Racing (Kyotei)
   echo "  Kyotei..." >&2
