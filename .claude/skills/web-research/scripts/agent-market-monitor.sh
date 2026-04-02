@@ -210,19 +210,40 @@ generate_llm_queries() {
     return
   fi
 
+  # Rotate between different research "personas" for query diversity
+  local personas=(
+    "CONTRARIAN: Find arguments AGAINST the consensus. What are bears saying? What risks are being ignored? Search for skeptics, short sellers, and critics."
+    "DEEP DIVE: Pick ONE topic from the findings and go deeper. Find primary sources, expert opinions, historical precedents, or technical analysis."
+    "CONNECTIONS: Find links between different themes. How does Topic A affect Topic B? Search for ripple effects, correlations, and second-order consequences."
+    "PREDICTIONS: What happens next? Search for forecasts, prediction markets, analyst expectations, and expert outlooks on these topics."
+    "ALTERNATIVE DATA: Find unconventional signals. Search for sentiment data, insider activity, supply chain indicators, or real-time data sources."
+    "HISTORICAL: Find historical parallels. When did similar situations happen before? What were the outcomes? Search for 'reminds me of' or 'similar to'."
+    "GLOBAL: How do other regions view this? Search for non-US perspectives, emerging market angles, or international implications."
+    "RETAIL vs INSTITUTIONAL: What are retail traders saying vs hedge funds? Search for r/wallstreetbets, fintwit sentiment, or institutional flows."
+    "BETTING MARKETS: What are prediction markets and betting odds saying? Search Kalshi, Polymarket, sports books, or futures markets for sentiment."
+    "RACING FORM: For any sports/racing topics, search for expert handicapping analysis, speed figures, trainer/jockey stats, or track conditions."
+  )
+  local persona_idx=$((RANDOM % ${#personas[@]}))
+  local persona="${personas[$persona_idx]}"
+
   # Ask the LLM to generate novel search queries
   local gen_prompt="You are a financial research assistant. Based on these recent findings from our database:
 
 ${recent}
 
-Generate exactly ${count} NEW search queries that would find DIFFERENT and DEEPER information than what we already have. Focus on:
-- Follow-up angles on stories we found (e.g. if we found inflation data, search for sector-specific impacts)
-- Contrarian or alternative perspectives
-- Emerging risks or opportunities not yet covered
-- Connections between different market themes
-- Specific data points, names, or events mentioned that deserve deeper investigation
+YOUR RESEARCH ANGLE: ${persona}
 
-Output ONLY the queries, one per line. No numbering, no explanation. Each query should be 4-8 words, optimized for web search."
+Generate exactly ${count} NEW search queries that would find DIFFERENT and DEEPER information than what we already have.
+
+Rules:
+- Each query should be 4-8 words, optimized for web search
+- Be SPECIFIC - use names, tickers, dates, or numbers when relevant
+- Don't repeat topics we already have
+- Include at least one prediction market or betting odds query if relevant
+
+Output ONLY the queries, one per line. No numbering, no explanation."
+
+  echo "[$(date)]   LLM query gen: using ${persona:0:20}... persona" >> "$LOG"
 
   local result
   result=$(LOCAL_SYSTEM_PROMPT="You output only search queries, one per line. No commentary." \
