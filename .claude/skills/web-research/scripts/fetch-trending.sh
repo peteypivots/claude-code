@@ -127,6 +127,62 @@ fetch_crypto_trending() {
     done
 }
 
+# === Source: Prediction Markets (Kalshi, Polymarket, PredictIt, etc.) ===
+fetch_prediction_markets() {
+  # Major prediction market platforms and topics
+  local platforms=(
+    "Kalshi prediction market"
+    "Polymarket odds"
+    "PredictIt contracts"
+    "Metaculus forecasts"
+    "Manifold Markets"
+  )
+  
+  # Hot prediction market categories
+  local categories=(
+    "election prediction market odds"
+    "Fed rate decision prediction market"
+    "recession probability prediction market"
+    "Trump Biden prediction market odds"
+    "inflation prediction market Kalshi"
+    "GDP forecast prediction market"
+    "unemployment rate prediction market"
+    "stock market prediction contracts"
+    "crypto prediction market prices"
+    "weather prediction market contracts"
+    "AI prediction market timelines"
+    "geopolitical event prediction markets"
+    "sports championship prediction market"
+    "Oscar Emmy prediction market odds"
+    "Supreme Court prediction market"
+    "IPO prediction market odds"
+  )
+  
+  # Output platform query and category query
+  echo "${platforms[$((RANDOM % ${#platforms[@]}))]}"
+  echo "${categories[$((RANDOM % ${#categories[@]}))]}"
+}
+
+# === Source: Kalshi Specific (regulated US prediction market) ===
+fetch_kalshi() {
+  # Kalshi is CFTC-regulated, trades on real events
+  local markets=(
+    "Kalshi Fed funds rate contracts"
+    "Kalshi inflation CPI contracts"
+    "Kalshi recession probability"
+    "Kalshi election contracts 2026"
+    "Kalshi GDP growth contracts"
+    "Kalshi unemployment rate"
+    "Kalshi housing prices"
+    "Kalshi climate weather contracts"
+    "Kalshi tech earnings contracts"
+    "Kalshi government shutdown odds"
+    "Kalshi debt ceiling contracts"
+    "Kalshi interest rate hike probability"
+  )
+  echo "${markets[$((RANDOM % ${#markets[@]}))]}"
+}
+
 # === Source: Product Hunt (via unofficial feed) ===
 fetch_producthunt() {
   # Product Hunt RSS converted to JSON-ish extraction
@@ -284,6 +340,14 @@ main() {
   # Crypto
   echo "  Crypto..." >&2
   fetch_crypto_trending > "$TMPDIR/crypto.txt" 2>/dev/null &
+  
+  # Prediction Markets
+  echo "  Prediction Markets..." >&2
+  fetch_prediction_markets > "$TMPDIR/prediction_markets.txt" 2>/dev/null &
+  
+  # Kalshi (regulated prediction market)
+  echo "  Kalshi..." >&2
+  fetch_kalshi > "$TMPDIR/kalshi.txt" 2>/dev/null &
   
   # GitHub
   echo "  GitHub..." >&2
