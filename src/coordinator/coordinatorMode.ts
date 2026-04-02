@@ -1,4 +1,6 @@
 import { feature } from 'bun:bundle'
+import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { ASYNC_AGENT_ALLOWED_TOOLS } from '../constants/tools.js'
 import { checkStatsigFeatureGate_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import {
@@ -108,7 +110,44 @@ export function getCoordinatorUserContext(
   return { workerToolsContext: content }
 }
 
+/**
+ * Read the coordinator prompt from the canopy-generated cache file.
+ * Returns null if the file doesn't exist or is too short (< 100 chars).
+ * The cache is populated by the SessionStart hook: cn render coordinator-full > .claude/.coordinator-prompt-cache
+ * Checks both cwd-relative and Docker /app mount paths.
+ */
+function readCachedCoordinatorPrompt(): string | null {
+  const candidatePaths = [
+    join(process.cwd(), '.claude', '.coordinator-prompt-cache'),
+    '/app/.claude/.coordinator-prompt-cache', // Docker mount path
+  ]
+  
+  for (const cacheFile of candidatePaths) {
+    if (!existsSync(cacheFile)) {
+      continue
+    }
+    try {
+      const content = readFileSync(cacheFile, 'utf-8')
+      // Require minimum length to avoid using empty/corrupt cache
+      if (content.length < 100) {
+        continue
+      }
+      return content
+    } catch {
+      continue
+    }
+  }
+  return null
+}
+
 export function getCoordinatorSystemPrompt(): string {
+  // Try canopy-managed cache first (populated by SessionStart hook)
+  const cachedPrompt = readCachedCoordinatorPrompt()
+  if (cachedPrompt) {
+    return cachedPrompt
+  }
+
+  // Fallback to hard-coded default if cache is missing
   const workerCapabilities = isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)
     ? 'Workers have access to Bash, Read, and Edit tools, plus MCP tools from configured MCP servers.'
     : 'Workers have access to standard tools, MCP tools from configured MCP servers, and project skills via the Skill tool. Delegate skill invocations (e.g. /commit, /verify) to workers.'

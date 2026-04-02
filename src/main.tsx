@@ -802,6 +802,11 @@ export async function main() {
   const hasSdkUrl = cliArgs.some(arg => arg.startsWith('--sdk-url'));
   const isNonInteractive = hasPrintFlag || hasInitOnlyFlag || hasSdkUrl || !process.stdout.isTTY;
 
+  // Debug: log session mode determination
+  if (process.env.OLLAMA_DEBUG === 'true') {
+    console.error(`[main.tsx] Session mode: hasPrintFlag=${hasPrintFlag}, hasInitOnlyFlag=${hasInitOnlyFlag}, hasSdkUrl=${hasSdkUrl}, stdout.isTTY=${process.stdout.isTTY}, isNonInteractive=${isNonInteractive}`);
+  }
+
   // Stop capturing early input for non-interactive modes
   if (isNonInteractive) {
     stopCapturingEarlyInput();

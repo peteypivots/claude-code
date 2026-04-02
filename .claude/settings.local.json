@@ -1,0 +1,131 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "ov prime --agent orchestrator 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "mulch prime 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "sd prime 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "cn prime 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "cn render coordinator-full > .claude/.coordinator-prompt-cache 2>/dev/null || true"
+					}
+				]
+			}
+		],
+		"UserPromptSubmit": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "ov mail check --inject --agent orchestrator 2>/dev/null || true"
+					}
+				]
+			}
+		],
+		"PreToolUse": [
+			{
+				"matcher": "Bash",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "read -r INPUT; CMD=$(echo \"$INPUT\" | sed 's/.*\"command\": *\"\\([^\"]*\\)\".*/\\1/'); if echo \"$CMD\" | grep -qE '\\bgit\\s+push\\b'; then echo '{\"decision\":\"block\",\"reason\":\"git push is blocked by overstory — merge locally, push manually when ready\"}'; exit 0; fi;"
+					}
+				]
+			},
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "read -r INPUT; TOOL_NAME=$(echo \"$INPUT\" | sed 's/.*\"tool_name\": *\"\\([^\"]*\\)\".*/\\1/'); ov log tool-start --agent orchestrator --tool-name \"$TOOL_NAME\" 2>/dev/null || true"
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "read -r INPUT; TOOL_NAME=$(echo \"$INPUT\" | sed 's/.*\"tool_name\": *\"\\([^\"]*\\)\".*/\\1/'); ov log tool-end --agent orchestrator --tool-name \"$TOOL_NAME\" 2>/dev/null || true"
+					}
+				]
+			},
+			{
+				"matcher": "Bash",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "read -r INPUT; if echo \"$INPUT\" | grep -q 'git commit'; then mulch diff HEAD~1 2>/dev/null || true; fi"
+					}
+				]
+			}
+		],
+		"Stop": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "ov log session-end --agent orchestrator 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "mulch learn 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "sd ready --quiet 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "mulch sync --quiet 2>/dev/null || true"
+					}
+				]
+			}
+		],
+		"SessionEnd": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "mulch learn 2>/dev/null || true"
+					},
+					{
+						"type": "command",
+						"command": "sd ready --quiet 2>/dev/null || true"
+					}
+				]
+			}
+		],
+		"PreCompact": [
+			{
+				"matcher": "",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "ov prime --agent orchestrator --compact"
+					}
+				]
+			}
+		]
+	}
+}

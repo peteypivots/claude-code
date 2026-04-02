@@ -34,6 +34,10 @@ WORKDIR /app
 # Install OS-level runtime dependencies
 RUN apk add --no-cache git ripgrep
 
+# Install os-eco tools globally (canopy, mulch, seeds, overstory)
+# These power the hook system for prompt management and expertise tracking
+RUN bun add -g @os-eco/canopy-cli @os-eco/mulch-cli @os-eco/seeds-cli @os-eco/overstory-cli 2>/dev/null || true
+
 # Copy package.json for external dependencies
 COPY --from=builder /app/package.json /app/package.json
 

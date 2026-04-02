@@ -820,7 +820,14 @@ async function* queryLoop(
             if (isWithheldMaxOutputTokens(message)) {
               withheld = true
             }
+            // Debug: trace message flow
+            if (process.env.OLLAMA_DEBUG === 'true') {
+              console.error(`[query.ts] Message type=${yieldMessage.type}, withheld=${withheld}`)
+            }
             if (!withheld) {
+              if (process.env.OLLAMA_DEBUG === 'true') {
+                console.error(`[query.ts] Yielding message type=${yieldMessage.type}`)
+              }
               yield yieldMessage
             }
             if (message.type === 'assistant') {

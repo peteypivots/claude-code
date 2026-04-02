@@ -12,13 +12,51 @@ import {
   type MessageContent,
   ProviderError,
 } from './types.js'
-import { appendFileSync } from 'fs'
+import { appendFileSync, mkdirSync } from 'fs'
+import { dirname } from 'path'
 
-const ROUTER_LOG = '/tmp/router-debug.log'
-function ollamaLog(msg: string) {
+const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
+
+// ANSI color codes
+const COLORS = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  cyan: '\x1b[36m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+  magenta: '\x1b[35m',
+  blue: '\x1b[34m',
+  dim: '\x1b[2m',
+}
+
+function ollamaLog(msg: string, level: 'info' | 'warn' | 'error' | 'success' | 'debug' | 'stream' = 'info') {
+  const timestamp = new Date().toISOString().substring(11, 23)
   const line = `[${new Date().toISOString()}] [OllamaClient] ${msg}\n`
-  try { appendFileSync(ROUTER_LOG, line) } catch {}
-  try { appendFileSync('/proc/1/fd/2', line) } catch {}
+  try {
+    mkdirSync(dirname(ROUTER_LOG), { recursive: true })
+    appendFileSync(ROUTER_LOG, line)
+  } catch {}
+  
+  // Skip raw chunk logging to console (too noisy)
+  if (level === 'stream') {
+    try { appendFileSync('/proc/1/fd/2', line) } catch {}
+    return
+  }
+  
+  // Colorized console output
+  let color = COLORS.blue
+  let prefix = '🔷'
+  switch (level) {
+    case 'warn': color = COLORS.yellow; prefix = '⚠️'; break
+    case 'error': color = COLORS.red; prefix = '❌'; break
+    case 'success': color = COLORS.green; prefix = '✅'; break
+    case 'debug': color = COLORS.dim; prefix = '  '; break
+  }
+  
+  const consoleMsg = `${color}${COLORS.bright}[${timestamp}]${COLORS.reset} ${prefix} [Ollama] ${msg}`
+  console.error(consoleMsg)
+  try { appendFileSync('/proc/1/fd/2', `[OllamaClient] ${msg}\n`) } catch {}
 }
 
 export interface OllamaConfig {
@@ -111,18 +149,56 @@ function mapModelToOllama(model: string): string {
 function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array<{ name: string; input: Record<string, unknown> }> {
   const toolCalls: Array<{ name: string; input: Record<string, unknown> }> = []
   
+  // Normalize tool name for fuzzy matching: remove separators, lowercase
+  // e.g., "web-search" -> "websearch", "WebSearch" -> "websearch", "web_search" -> "websearch"
+  const normalizeToolName = (name: string): string => 
+    name.toLowerCase().replace(/[-_]/g, '')
+  
+  // Fuzzy resolve a tool name against allowed tools
+  // Returns the actual tool name if found, or null
+  const fuzzyResolveToolName = (inputName: string, allowed: Set<string>): string | null => {
+    // Direct match first
+    if (allowed.has(inputName)) return inputName
+    
+    const normalizedInput = normalizeToolName(inputName)
+    
+    for (const allowedName of allowed) {
+      // Check if normalized names match exactly
+      if (normalizeToolName(allowedName) === normalizedInput) {
+        return allowedName
+      }
+      
+      // Check if allowed name ends with the normalized input (for MCP tools)
+      // e.g., "mcp__server__list_directory" ends with "listdirectory"
+      const normalizedAllowed = normalizeToolName(allowedName)
+      if (normalizedAllowed.endsWith(normalizedInput)) {
+        return allowedName
+      }
+    }
+    
+    return null
+  }
+  
   // Match pattern 1: [Tool Use: ToolName] followed by JSON
   const toolUsePattern = /\[Tool Use:\s*([^\]]+)\]\s*(\{[\s\S]*?\})/g
   let match
   
   while ((match = toolUsePattern.exec(text)) !== null) {
-    const toolName = match[1].trim()
+    const inputName = match[1].trim()
     const argsJson = match[2]
     
-    // Skip if tool is not in allowed list
-    if (allowedToolNames && !allowedToolNames.has(toolName)) {
-      ollamaLog(`Skipping disallowed tool call: ${toolName} (tool has been disabled)`)
+    // Fuzzy resolve tool name
+    const toolName = allowedToolNames 
+      ? fuzzyResolveToolName(inputName, allowedToolNames)
+      : inputName
+    
+    if (!toolName) {
+      ollamaLog(`Skipping unknown tool: ${inputName} (no fuzzy match found)`)
       continue
+    }
+    
+    if (toolName !== inputName) {
+      ollamaLog(`Fuzzy resolved: ${inputName} -> ${toolName}`)
     }
     
     try {
@@ -130,39 +206,28 @@ function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array
       toolCalls.push({ name: toolName, input })
       ollamaLog(`Parsed text tool call: ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
     } catch (e) {
-      ollamaLog(`Failed to parse tool args for ${toolName}: ${argsJson.substring(0, 100)}`)
+      ollamaLog(`Failed to parse tool args for ${inputName}: ${argsJson.substring(0, 100)}`)
     }
   }
   
   // Match pattern 2: <tool-name>{json}</tool-name> (XML-style)
-  // Map kebab-case to known tool names
-  const toolNameMap: Record<string, string> = {
-    'web-search': 'WebSearch',
-    'web-fetch': 'WebFetch',
-    'bash': 'Bash',
-    'read': 'Read',
-    'write': 'Write',
-    'edit': 'Edit',
-    'glob': 'Glob',
-    'grep': 'Grep',
-    'agent': 'Agent',
-    'list-mcp-resources-tool': 'ListMcpResourcesTool',
-    'read-mcp-resource-tool': 'ReadMcpResourceTool',
-    'ask-user-question': 'AskUserQuestion',
-  }
-  
   const xmlToolPattern = /<([a-z][a-z0-9-]*)>\s*(\{[\s\S]*?\})\s*<\/\1>/gi
   while ((match = xmlToolPattern.exec(text)) !== null) {
-    const xmlTagName = match[1].toLowerCase()
+    const xmlTagName = match[1]
     const argsJson = match[2]
     
-    // Map to actual tool name
-    const toolName = toolNameMap[xmlTagName] || xmlTagName
+    // Fuzzy resolve tool name
+    const toolName = allowedToolNames 
+      ? fuzzyResolveToolName(xmlTagName, allowedToolNames)
+      : xmlTagName
     
-    // Skip if tool is not in allowed list
-    if (allowedToolNames && !allowedToolNames.has(toolName)) {
-      ollamaLog(`Skipping disallowed XML tool call: ${toolName} (tool has been disabled)`)
+    if (!toolName) {
+      ollamaLog(`Skipping unknown XML tool: ${xmlTagName} (no fuzzy match found)`)
       continue
+    }
+    
+    if (toolName !== xmlTagName) {
+      ollamaLog(`Fuzzy resolved: ${xmlTagName} -> ${toolName}`)
     }
     
     try {
@@ -171,6 +236,49 @@ function parseTextToolCalls(text: string, allowedToolNames?: Set<string>): Array
       ollamaLog(`Parsed XML tool call: <${xmlTagName}> -> ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
     } catch (e) {
       ollamaLog(`Failed to parse XML tool args for <${xmlTagName}>: ${argsJson.substring(0, 100)}`)
+    }
+  }
+  
+  // Match pattern 3: <tool_call>[{...}]</tool_call> - JSON array of tool calls
+  // This is the format used by models fine-tuned on the claude-code tool call format
+  const toolCallBlockPattern = /<tool_call>\s*\[?([\s\S]*?)\]?\s*<\/tool_call>/gi
+  while ((match = toolCallBlockPattern.exec(text)) !== null) {
+    const content = match[1].trim()
+    try {
+      // Parse as JSON - could be array or single object
+      let calls: Array<{ name: string; arguments: Record<string, unknown> }>
+      if (content.startsWith('[')) {
+        calls = JSON.parse(content)
+      } else if (content.startsWith('{')) {
+        calls = [JSON.parse(content)]
+      } else {
+        // Try wrapping in array brackets
+        calls = JSON.parse(`[${content}]`)
+      }
+      
+      for (const call of calls) {
+        const inputName = call.name
+        const input = call.arguments || {}
+        
+        // Fuzzy resolve tool name
+        const toolName = allowedToolNames 
+          ? fuzzyResolveToolName(inputName, allowedToolNames)
+          : inputName
+        
+        if (!toolName) {
+          ollamaLog(`Skipping unknown <tool_call> tool: ${inputName} (no fuzzy match found)`)
+          continue
+        }
+        
+        if (toolName !== inputName) {
+          ollamaLog(`Fuzzy resolved: ${inputName} -> ${toolName}`)
+        }
+        
+        toolCalls.push({ name: toolName, input })
+        ollamaLog(`Parsed <tool_call> format: ${toolName} -> ${JSON.stringify(input).substring(0, 100)}`)
+      }
+    } catch (e) {
+      ollamaLog(`Failed to parse <tool_call> content: ${content.substring(0, 100)}`)
     }
   }
   
@@ -224,12 +332,26 @@ const DEFAULT_OLLAMA_CONFIG: OllamaConfig = {
   retries: parseInt(process.env.OLLAMA_RETRIES || '3', 10),
 }
 
+// Global request queue to prevent concurrent Ollama requests
+// (Ollama interleaves responses when multiple requests run simultaneously)
+let requestQueue: Promise<void> = Promise.resolve()
+let requestIdCounter = 0
+let instanceIdCounter = 0
+
 export class OllamaProvider implements ILLMProvider {
   private config: OllamaConfig
   private lastError?: Error
+  private instanceId: number
 
   constructor(config: Partial<OllamaConfig> = {}) {
     this.config = { ...DEFAULT_OLLAMA_CONFIG, ...config }
+    this.instanceId = ++instanceIdCounter
+    ollamaLog(`[INSTANCE-${this.instanceId}] OllamaProvider created`, 'debug')
+    if (process.env.OLLAMA_DEBUG_STACKS === 'true') {
+      // Optional deep trace for diagnosing who created a provider instance.
+      const stack = new Error().stack?.split('\n').slice(1, 6).join('\n') || 'no stack'
+      ollamaLog(`[INSTANCE-${this.instanceId}] CREATOR STACK:\n${stack}`, 'debug')
+    }
   }
 
   getName() {
@@ -394,6 +516,37 @@ export class OllamaProvider implements ILLMProvider {
   async *stream(
     options: LLMRequestOptions,
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
+    // Queue this request to prevent interleaved responses
+    const requestId = ++requestIdCounter
+    let resolveQueue: () => void
+    const myTurn = new Promise<void>(resolve => { resolveQueue = resolve })
+    const previousQueue = requestQueue
+    requestQueue = myTurn
+    
+    // Wait for previous request to complete
+    await previousQueue
+    ollamaLog(`[INSTANCE-${this.instanceId}] [REQ-${requestId}] Starting stream (was queued)`)
+    
+    try {
+      yield* this._streamImpl(options, requestId)
+    } finally {
+      ollamaLog(`[INSTANCE-${this.instanceId}] [REQ-${requestId}] Stream finished, releasing queue`)
+      resolveQueue!()
+    }
+  }
+
+  private async *_streamImpl(
+    options: LLMRequestOptions,
+    requestId: number,
+  ): AsyncGenerator<LLMStreamEvent, void, unknown> {
+    // Log caller context to identify which code path is making this call
+    const firstUserMsg = options.messages.find(m => m.role === 'user')
+    const msgPreview = firstUserMsg 
+      ? (typeof firstUserMsg.content === 'string' ? firstUserMsg.content : JSON.stringify(firstUserMsg.content)).substring(0, 100)
+      : 'no-user-msg'
+    ollamaLog(`[REQ-${requestId}] First user msg: ${msgPreview}`)
+    ollamaLog(`[REQ-${requestId}] System prompt: ${(options.systemPrompt || '(none)').substring(0, 100)}`)
+    
     const messages = this.convertMessages(options.messages)
     
     // DEBUG: Log converted messages - especially tool results
@@ -428,6 +581,9 @@ export class OllamaProvider implements ILLMProvider {
       streamOptions.num_ctx = parseInt(process.env.OLLAMA_NUM_CTX, 10)
     }
 
+    // Check if native tool calling is enabled (default: false for text-based tool models)
+    const useNativeTools = process.env.OLLAMA_NATIVE_TOOLS === 'true'
+
     const requestBody: Record<string, unknown> = {
       model: ollamaModel,
       messages,
@@ -442,13 +598,31 @@ export class OllamaProvider implements ILLMProvider {
       }),
     }
     
-    // Add tools if provided
-    if (ollamaTools && ollamaTools.length > 0) {
+    // Only add tools if native tool calling is explicitly enabled
+    // Text-based tool models (like claude-explorer) output <tool_call> tags as text
+    // which we parse instead of using Ollama's native tool API
+    if (useNativeTools && ollamaTools && ollamaTools.length > 0) {
       requestBody.tools = ollamaTools
-      ollamaLog(`stream() sending ${ollamaTools.length} tools to model ${ollamaModel}`)
-      ollamaLog(`First tool: ${JSON.stringify(ollamaTools[0]).substring(0, 300)}`)
+      ollamaLog(`[REQ-${requestId}] stream() sending ${ollamaTools.length} tools to model ${ollamaModel} (native mode)`)
+      ollamaLog(`[REQ-${requestId}] First tool: ${JSON.stringify(ollamaTools[0]).substring(0, 300)}`)
+    } else if (ollamaTools && ollamaTools.length > 0) {
+      ollamaLog(`[REQ-${requestId}] stream() ${ollamaTools.length} tools available (text-based parsing mode)`)
     } else {
-      ollamaLog(`stream() NO tools sent to model ${ollamaModel}`)
+      ollamaLog(`[REQ-${requestId}] stream() NO tools sent to model ${ollamaModel}`)
+      if (process.env.OLLAMA_DEBUG_STACKS === 'true') {
+        const stack = new Error().stack?.split('\n').slice(1, 6).join('\n') || 'no stack'
+        ollamaLog(`[REQ-${requestId}] CALLER STACK:\n${stack}`, 'debug')
+      }
+    }
+
+    if (process.env.OLLAMA_DEBUG_FULL_REQUEST === 'true') {
+      try {
+        mkdirSync(dirname(ROUTER_LOG), { recursive: true })
+        appendFileSync(
+          ROUTER_LOG,
+          `[${new Date().toISOString()}] [OllamaClient] [REQ-${requestId}] FULL REQUEST BODY:\n${JSON.stringify(requestBody, null, 2)}\n`,
+        )
+      } catch {}
     }
 
     let lastError: Error | undefined
@@ -461,6 +635,7 @@ export class OllamaProvider implements ILLMProvider {
           this.config.timeout,
         )
 
+        ollamaLog(`[REQ-${requestId}] Fetching from ${this.config.baseUrl}/api/chat...`, 'debug')
         const response = await fetch(`${this.config.baseUrl}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -468,6 +643,7 @@ export class OllamaProvider implements ILLMProvider {
           signal: controller.signal,
           timeout: this.config.timeout,
         })
+        ollamaLog(`[REQ-${requestId}] Fetch response received: status=${response.status}`, 'debug')
 
         clearTimeout(timeoutId)
 
@@ -482,6 +658,7 @@ export class OllamaProvider implements ILLMProvider {
           throw new Error('Response body is empty')
         }
 
+        ollamaLog(`[REQ-${requestId}] Response body received, starting stream reader...`, 'debug')
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
@@ -490,10 +667,15 @@ export class OllamaProvider implements ILLMProvider {
         const accumulatedToolCalls: Array<{ id: string; name: string; input: Record<string, unknown> }> = []
         // Accumulate text content for text-based tool parsing
         let accumulatedText = ''
+        let chunkCount = 0
 
         try {
           while (true) {
             const { done, value } = await reader.read()
+            chunkCount++
+            if (chunkCount === 1) {
+              ollamaLog(`[REQ-${requestId}] First chunk received from Ollama`, 'debug')
+            }
             if (done) break
 
             buffer += decoder.decode(value, { stream: true })
@@ -508,9 +690,10 @@ export class OllamaProvider implements ILLMProvider {
               try {
                 const chunk = JSON.parse(line)
                 
-                // Debug: log raw Ollama chunks
+                // Debug: log raw Ollama chunks (to file only, not console)
                 if (process.env.OLLAMA_DEBUG === 'true') {
-                  ollamaLog(`Raw chunk: ${JSON.stringify(chunk).substring(0, 500)}`)
+                  ollamaLog(`Raw chunk: ${JSON.stringify(chunk).substring(0, 1000)}`, 'stream')
+                  ollamaLog(`  content="${chunk.message?.content || ''}", tool_calls=${chunk.message?.tool_calls?.length || 0}, done=${chunk.done}`, 'debug')
                 }
 
                 if (chunk.message?.content) {
@@ -526,6 +709,7 @@ export class OllamaProvider implements ILLMProvider {
                 
                 // Handle tool calls in streaming response - accumulate them
                 if (chunk.message?.tool_calls && Array.isArray(chunk.message.tool_calls)) {
+                  ollamaLog(`🔧 NATIVE TOOL CALL detected in stream!`, 'success')
                   for (const toolCall of chunk.message.tool_calls) {
                     const toolId = toolCall.id || `toolu_${Date.now().toString(36)}${Math.random().toString(36).substring(2, 6)}`
                     const toolName = toolCall.function?.name || toolCall.name
@@ -553,9 +737,14 @@ export class OllamaProvider implements ILLMProvider {
                   
                   // Check for text-based tool calls if no native tool_calls were found
                   if (accumulatedToolCalls.length === 0 && accumulatedText) {
+                    ollamaLog(`No native tool_calls, checking text for tool syntax...`, 'debug')
                     // First check if there are any tool calls that would be blocked
                     const allTextToolCalls = parseTextToolCalls(accumulatedText, undefined) // Get all parsed calls
                     const filteredToolCalls = parseTextToolCalls(accumulatedText, allowedToolNames) // Get only allowed
+                    
+                    if (allTextToolCalls.length > 0) {
+                      ollamaLog(`📝 Found ${allTextToolCalls.length} text-based tool calls: ${allTextToolCalls.map(t => t.name).join(', ')}`, 'success')
+                    }
                     
                     // If some were blocked, record which one
                     if (allTextToolCalls.length > 0 && filteredToolCalls.length === 0) {
@@ -568,9 +757,17 @@ export class OllamaProvider implements ILLMProvider {
                     }
                   }
                   
+                  // Log stream completion summary
+                  ollamaLog(`Stream complete. Tool calls: ${accumulatedToolCalls.length}, Text length: ${accumulatedText.length} chars`, 'info')
+                  if (accumulatedToolCalls.length === 0 && accumulatedText.length > 0) {
+                    const preview = accumulatedText.substring(0, 100).replace(/\n/g, ' ')
+                    ollamaLog(`⚠️  Model gave TEXT response (no tools): "${preview}..."`, 'warn')
+                  }
+                  
                   // Only include text content if no tool calls (tool-using text is for the LLM, not user)
-                  if (accumulatedToolCalls.length === 0 && chunk.message?.content) {
-                    finalContent.push({ type: 'text', text: chunk.message.content })
+                  // Use accumulatedText (not chunk.message.content) because the final done=true chunk has empty content
+                  if (accumulatedToolCalls.length === 0 && accumulatedText) {
+                    finalContent.push({ type: 'text', text: accumulatedText })
                   }
                   
                   // If a tool was blocked and there's no other content, provide helpful message
@@ -579,7 +776,7 @@ export class OllamaProvider implements ILLMProvider {
                       type: 'text', 
                       text: `I attempted to use ${blockedToolCall} again, but it has been disabled due to a loop. I should now answer the user's question based on the information I've already gathered from previous tool results. If I need more information, I should try a different tool.`
                     })
-                    ollamaLog(`Injected fallback text for blocked tool: ${blockedToolCall}`)
+                    ollamaLog(`Injected fallback text for blocked tool: ${blockedToolCall}`, 'warn')
                   }
                   
                   // Use accumulated tool calls (from native or text-parsed)

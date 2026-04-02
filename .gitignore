@@ -42,5 +42,7 @@ bun.lockb
 tmp/
 temp/
 
+# Canopy prompt cache (generated at session start)
+.claude/.coordinator-prompt-cache
 
 .docker-persist/

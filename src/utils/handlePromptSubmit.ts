@@ -557,6 +557,15 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
             ? primaryCmd.value
             : undefined
         const shouldCallBeforeQuery = primaryMode === 'prompt'
+        // Debug: log before calling onQuery
+        if (process.env.OLLAMA_DEBUG === 'true') {
+          console.error(`[handlePromptSubmit] About to call onQuery with ${newMessages.length} new messages, shouldQuery=${shouldQuery}`)
+          const { appendFileSync, mkdirSync } = require('fs')
+          const { dirname } = require('path')
+          const debugLogPath = process.env.OLLAMA_DEBUG_UI_LOG_FILE || '/data/logs/claude-debug.log'
+          mkdirSync(dirname(debugLogPath), { recursive: true })
+          appendFileSync(debugLogPath, `[handlePromptSubmit] About to call onQuery with ${newMessages.length} new messages, shouldQuery=${shouldQuery}\n`)
+        }
         await onQuery(
           newMessages,
           abortController,
@@ -569,6 +578,10 @@ async function executeUserInput(params: ExecuteUserInputParams): Promise<void> {
           primaryInput,
           effort,
         )
+        // Debug: log after onQuery completes
+        if (process.env.OLLAMA_DEBUG === 'true') {
+          console.error(`[handlePromptSubmit] onQuery completed`)
+        }
       } else {
         // Local slash commands that skip messages (e.g., /model, /theme).
         // Release the guard BEFORE clearing toolJSX to prevent spinner flash —

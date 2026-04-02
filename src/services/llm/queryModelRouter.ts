@@ -6,14 +6,46 @@
  */
 
 import { randomUUID, type UUID } from 'crypto'
-import { appendFileSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdirSync, writeFileSync } from 'fs'
+import { dirname } from 'path'
 
-const ROUTER_LOG = '/tmp/router-debug.log'
-function routerLog(msg: string) {
+const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
+
+// ANSI color codes for terminal output
+const COLORS = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  cyan: '\x1b[36m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  red: '\x1b[31m',
+  magenta: '\x1b[35m',
+  blue: '\x1b[34m',
+}
+
+function routerLog(msg: string, level: 'info' | 'warn' | 'error' | 'success' | 'debug' = 'info') {
+  const timestamp = new Date().toISOString().substring(11, 23) // HH:MM:SS.mmm
   const line = `[${new Date().toISOString()}] [Router] ${msg}\n`
-  try { appendFileSync(ROUTER_LOG, line) } catch {}
-  // Write to PID 1 stderr so it appears in docker logs / promtail
-  try { appendFileSync('/proc/1/fd/2', line) } catch {}
+  try {
+    mkdirSync(dirname(ROUTER_LOG), { recursive: true })
+    appendFileSync(ROUTER_LOG, line)
+  } catch {}
+  
+  // Colorized console output
+  let color = COLORS.cyan
+  let prefix = '🔵'
+  switch (level) {
+    case 'warn': color = COLORS.yellow; prefix = '⚠️'; break
+    case 'error': color = COLORS.red; prefix = '❌'; break
+    case 'success': color = COLORS.green; prefix = '✅'; break
+    case 'debug': color = COLORS.magenta; prefix = '🔍'; break
+  }
+  
+  const consoleMsg = `${color}${COLORS.bright}[${timestamp}]${COLORS.reset} ${prefix} ${msg}`
+  console.error(consoleMsg)
+  
+  // Also write to PID 1 stderr for docker logs
+  try { appendFileSync('/proc/1/fd/2', `[Router] ${msg}\n`) } catch {}
 }
 
 import type {
@@ -111,18 +143,11 @@ export async function getRoutingDecisionAsync(
     return { useLocal: false, reason: 'routing_disabled', model: 'claude' }
   }
 
-  // If no valid Anthropic key, skip orchestrator — escalation is impossible,
-  // so just go straight to local and save the 5s orchestrator latency.
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey || apiKey.includes('YOUR_API_KEY')) {
-    routerLog('No valid Anthropic key — skipping orchestrator, routing directly to local')
-    return {
-      useLocal: true,
-      reason: 'no_claude_key_direct_local',
-      model: config.localModel,
-      action: 'local',
-    }
-  }
+  // Do not skip the orchestrator when Anthropic key is missing.
+  // The orchestrator itself runs locally (Ollama) and can still provide
+  // useful tool suggestions (e.g., WebSearch) even when cloud escalation is
+  // unavailable. Escalation is already overridden to local in
+  // mapOrchestratorDecision() when no valid Claude key exists.
 
   // Get last user message content
   const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
@@ -291,78 +316,6 @@ function shouldUseLocalModelStatic(
 
   // Default: use local
   return { useLocal: true, reason: 'default', model: config.localModel }
-}
-
-// ============================================================================
-// Loop Detection & Adaptive Temperature
-// ============================================================================
-
-// Track consecutive blocked tool attempts (per tool name)
-const blockedToolAttempts = new Map<string, number>()
-const MAX_BLOCKED_ATTEMPTS = 2 // Increased to allow temperature retries first
-
-// Track retry count for current conversation (for adaptive temperature)
-let conversationRetryCount = 0
-const MAX_RETRIES = 3 // Max temperature retries before forcing end turn
-
-/**
- * Detect if the model is stuck in a tool loop.
- * Returns the tool name if the same tool was called 3+ times consecutively.
- */
-function detectToolLoop(messages: Message[], threshold = 3): string | null {
-  // Collect the last N tool names from assistant messages
-  const recentToolCalls: string[] = []
-  
-  // Walk backwards through messages
-  for (let i = messages.length - 1; i >= 0 && recentToolCalls.length < threshold + 2; i--) {
-    const msg = messages[i]
-    if (msg?.type === 'assistant') {
-      const toolUses = msg.message.content.filter((c: any) => c.type === 'tool_use')
-      for (const tu of toolUses) {
-        recentToolCalls.unshift((tu as { name: string }).name)
-      }
-    }
-  }
-  
-  routerLog(`Loop check: recent tools = [${recentToolCalls.join(', ')}]`)
-  
-  // Check if the last `threshold` tools are the same
-  if (recentToolCalls.length >= threshold) {
-    const lastN = recentToolCalls.slice(-threshold)
-    const allSame = lastN.every(t => t === lastN[0])
-    if (allSame) {
-      return lastN[0] as string
-    }
-  }
-  
-  return null
-}
-
-/**
- * Track blocked tool attempts. Returns true if we should force end the turn.
- * Also increments retry count for adaptive temperature.
- */
-function trackBlockedTool(toolName: string): boolean {
-  const attempts = (blockedToolAttempts.get(toolName) || 0) + 1
-  blockedToolAttempts.set(toolName, attempts)
-  conversationRetryCount++
-  routerLog(`Blocked tool "${toolName}" attempt #${attempts}, conversation retry #${conversationRetryCount}`)
-  return attempts >= MAX_BLOCKED_ATTEMPTS && conversationRetryCount >= MAX_RETRIES
-}
-
-/**
- * Get current retry count for adaptive temperature
- */
-export function getConversationRetryCount(): number {
-  return conversationRetryCount
-}
-
-/**
- * Reset blocked tool tracking (call at start of new user message)
- */
-function resetBlockedToolTracking(): void {
-  blockedToolAttempts.clear()
-  conversationRetryCount = 0
 }
 
 // ============================================================================
@@ -535,6 +488,15 @@ function createAssistantMessage(
   const betaContent = convertToBetaContent(content)
   const hasToolUse = content.some(c => c.type === 'tool_use')
 
+  routerLog(`Creating AssistantMessage: content=${content.length} blocks, model=${model}`, 'debug')
+  for (const c of content) {
+    if (c.type === 'text') {
+      routerLog(`  TEXT block: "${c.text?.substring(0, 80)}..."`, 'info')
+    } else if (c.type === 'tool_use') {
+      routerLog(`  TOOL_USE block: ${(c as any).name}`, 'info')
+    }
+  }
+
   const betaMessage: BetaMessage = {
     id: `msg_local_${Date.now().toString(36)}`,
     type: 'message',
@@ -551,6 +513,8 @@ function createAssistantMessage(
     },
   }
 
+  routerLog(`AssistantMessage created: id=${betaMessage.id}, stop_reason=${betaMessage.stop_reason}`, 'success')
+
   return {
     type: 'assistant',
     uuid: randomUUID() as UUID,
@@ -563,13 +527,26 @@ function createAssistantMessage(
 // Streaming Conversion
 // ============================================================================
 
+// Counter for stream events to avoid overwhelming logs
+let streamEventCount = 0
+
 /**
  * Convert LLM stream event to Anthropic StreamEvent
  */
 function convertToStreamEvent(event: LLMStreamEvent, model: string): StreamEvent | null {
+  streamEventCount++
+  
+  // Log first few events and every 20th for debugging
+  if (streamEventCount <= 3 || streamEventCount % 20 === 0) {
+    routerLog(`[STREAM] Event #${streamEventCount}: type=${event.type}`, 'debug')
+  }
+  
   if (event.type === 'content_block_delta') {
     const delta = (event as { delta?: { text?: string } }).delta
     if (delta?.text) {
+      if (streamEventCount <= 3) {
+        routerLog(`[STREAM] Yielding text_delta: "${delta.text.substring(0, 30)}"`, 'success')
+      }
       return {
         type: 'stream_event',
         event: {
@@ -587,6 +564,7 @@ function convertToStreamEvent(event: LLMStreamEvent, model: string): StreamEvent
   if (event.type === 'content_block_start') {
     const block = (event as { content_block?: { type: string; name?: string; id?: string; input?: unknown } }).content_block
     if (block?.type === 'tool_use') {
+      routerLog(`[STREAM] Yielding tool_use: ${block.name}`, 'success')
       return {
         type: 'stream_event',
         event: {
@@ -639,40 +617,46 @@ export async function* queryModelWithRouting(
 ): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
   const { messages, systemPrompt, tools, signal } = params
 
-  // Reset blocked tool tracking when we see a new user message (no assistant messages yet)
-  // This allows a clean slate for each new user query
-  const hasAssistantMessages = messages.some(m => m.type === 'assistant')
-  if (!hasAssistantMessages) {
-    resetBlockedToolTracking()
+  // Extract last user message for logging
+  const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
+  const userQuery = lastUserMsg?.type === 'user' 
+    ? (typeof lastUserMsg.message?.content === 'string' 
+        ? lastUserMsg.message.content.substring(0, 80) 
+        : '[complex content]')
+    : '[no user message]'
+
+  routerLog(`\n${'='.repeat(60)}`, 'info')
+  routerLog(`NEW QUERY: "${userQuery}"`, 'info')
+  routerLog(`Tools available: ${tools?.length || 0}`, 'debug')
+  if (tools && tools.length > 0) {
+    const toolNames = tools.slice(0, 5).map(t => t.name).join(', ')
+    routerLog(`First 5 tools: ${toolNames}${tools.length > 5 ? '...' : ''}`, 'debug')
   }
 
-  routerLog(`=== queryModelWithRouting called ===`)
-  routerLog(`Tools count: ${tools?.length || 0}`)
-  routerLog(`Tool names: ${tools?.map(t => t.name).join(', ') || 'none'}`)
-  routerLog(`Config enabled: ${config.enabled}, useLLMOrchestrator: ${config.useLLMOrchestrator}`)
-  routerLog(`Conversation retry count: ${conversationRetryCount}`)
+  // Get routing decision (async - may call orchestrator)
+  let decision = await getRoutingDecisionAsync(messages, tools, config)
 
-  // Get routing decision (async - may call orchestrator with adaptive temperature)
-  let decision = await getRoutingDecisionAsync(messages, tools, config, conversationRetryCount)
-
-  routerLog(`Decision: action=${decision.action}, useLocal=${decision.useLocal}, reason=${decision.reason}, model=${decision.model}, suggestedTool=${decision.suggestedTool || 'none'}`)
-
-  if (config.verbose) {
-    console.log(`[Router] Decision: ${decision.action || (decision.useLocal ? 'LOCAL' : 'CLAUDE')} - ${decision.reason}`)
-    if (decision.suggestedTool) {
-      console.log(`[Router] Suggested first tool: ${decision.suggestedTool}`)
-    }
+  // Log routing decision prominently
+  const routeEmoji = decision.useLocal ? '🏠' : '☁️'
+  const routeTarget = decision.useLocal ? `LOCAL (${decision.model})` : 'CLAUDE'
+  routerLog(`${routeEmoji} ROUTING → ${routeTarget}`, decision.useLocal ? 'success' : 'warn')
+  routerLog(`   Reason: ${decision.reason}`, 'debug')
+  if (decision.suggestedTool) {
+    routerLog(`   Suggested tool: ${decision.suggestedTool}`, 'info')
   }
 
   // Handle escalation to Claude (with fallback to local+tools if Claude fails)
   if (!decision.useLocal) {
     try {
+      routerLog(`Escalating to Claude API...`, 'warn')
       const { queryModelWithStreaming } = await import('../api/claude.js')
       yield* queryModelWithStreaming(params as Parameters<typeof queryModelWithStreaming>[0])
       recordClaudeCall(0)
+      routerLog(`Claude response complete`, 'success')
       return
     } catch (error) {
-      routerLog(`Claude escalation failed, falling back to local with tools: ${error}`)
+      routerLog(`Claude escalation failed: ${error}`, 'error')
+      routerLog(`Falling back to local model with tools`, 'warn')
       // Fall through to local model with tools instead of failing
       decision = { ...decision, useLocal: true, model: config.localModel, action: 'local', reason: 'claude_fallback' }
     }
@@ -680,11 +664,13 @@ export async function* queryModelWithRouting(
 
   // Handle reasoning action - prepend reasoning step
   if (decision.action === 'reason') {
+    routerLog(`Invoking reasoning model (DeepSeek-R1)...`, 'info')
     yield* handleReasoningAction(params, decision, config)
     return
   }
 
   // Handle local action
+  routerLog(`Calling local model: ${decision.model}`, 'info')
   yield* handleLocalAction(params, decision, config)
 }
 
@@ -770,12 +756,6 @@ async function* handleLocalAction(
     return
   }
 
-  // Detect tool loops
-  const loopedTool = detectToolLoop(messages)
-  if (loopedTool) {
-    routerLog(`LOOP DETECTED: tool "${loopedTool}" called 3+ times consecutively`)
-  }
-
   try {
     const llmMessages = convertMessagesToLLM(messages)
     const llmTools = await convertToolsToLLM(tools)
@@ -783,7 +763,7 @@ async function* handleLocalAction(
     routerLog(`handleLocalAction: model=${decision.model}, tools=${llmTools?.length || 0}`)
     if (llmTools && llmTools.length > 0) {
       // Log first 3 tool schemas to verify format
-      for (const t of llmTools.slice(0, 3)) {
+      for (const t of llmTools.slice(0, 3) as any[]) {
         routerLog(`  Tool: ${t.name} - desc length: ${t.description?.length || 0} - props: ${JSON.stringify(Object.keys(t.input_schema?.properties || {}))}`)
       }
     }
@@ -829,93 +809,22 @@ async function* handleLocalAction(
       routerLog('Detected web search results in conversation, adding answer instruction')
     }
 
-    // If we're in a loop, inject nudge AND remove the looped tool
-    let filteredTools = llmTools
-    let forceEndTurn = false
-    if (loopedTool) {
-      // Track this block and check if we should force end the turn
-      forceEndTurn = trackBlockedTool(loopedTool)
-      
-      if (forceEndTurn) {
-        routerLog(`Forcing end turn after ${MAX_BLOCKED_ATTEMPTS} blocked attempts for "${loopedTool}"`)
-        
-        // If we have web search results, force an answer based on them
-        if (webSearchContent) {
-          // Extract key info from search results
-          const keyInfoMatch = webSearchContent.match(/Key information found:\n([\s\S]*?)(?:\n\n|Links:|$)/)
-          const answerInfo = keyInfoMatch ? keyInfoMatch[1].trim() : webSearchContent.substring(0, 500)
-          
-          // Get the original question from messages
-          const originalQuestion = messages.find(m => 
-            m.role === 'user' && 
-            typeof m.content === 'string' &&
-            !m.content.includes('tool_result')
-          )?.content as string || 'your question'
-          
-          const forceEndMessage = `Based on the web search results:\n\n${answerInfo}\n\nI found the information you were looking for. Let me know if you need more details!`
-          
-          yield {
-            type: 'message_start',
-            message: {
-              id: `msg_${Date.now().toString(36)}`,
-              type: 'message',
-              role: 'assistant',
-              content: [],
-              model: decision.model,
-            },
-          } as StreamEvent
-          
-          yield createAssistantMessage(
-            [{ type: 'text', text: forceEndMessage }],
-            decision.model,
-            { inputTokens: 0, outputTokens: 0 }
-          )
-          return
-        }
-        
-        // Default force end for non-search situations
-        const forceEndMessage = `I apologize, but I'm having difficulty completing this task. I've attempted to use ${loopedTool} multiple times but it doesn't seem to be providing the information needed.\n\nPlease try rephrasing your question or ask me to use a different approach.`
-        
-        yield {
-          type: 'message_start',
-          message: {
-            id: `msg_${Date.now().toString(36)}`,
-            type: 'message',
-            role: 'assistant',
-            content: [],
-            model: decision.model,
-          },
-        } as StreamEvent
-        
-        yield createAssistantMessage(
-          [{ type: 'text', text: forceEndMessage }],
-          decision.model,
-          { inputTokens: 0, outputTokens: 0 }
-        )
-        return
-      }
-      
-      systemPromptText += `\n\n⚠️ LOOP DETECTED: You have called "${loopedTool}" multiple times with the same result. You already have the information from this tool. The tool "${loopedTool}" has been DISABLED for this turn. Instead:\n- If you have enough information, provide your final answer\n- If you need different information, use a DIFFERENT tool (e.g., Bash, Glob, Read)\n- Do NOT attempt to call ${loopedTool}`
-      
-      // Actually remove the looped tool from available tools
-      if (filteredTools) {
-        filteredTools = filteredTools.filter(t => t.name !== loopedTool)
-        routerLog(`Filtered out looped tool "${loopedTool}", ${filteredTools.length} tools remaining`)
-      }
-    }
-
     // Stream from local model
+    routerLog(`[STREAM] Starting stream from ${decision.model}...`, 'info')
+    streamEventCount = 0 // Reset counter for new stream
+    
     const stream = provider.stream({
       model: decision.model,
       messages: llmMessages,
       systemPrompt: systemPromptText,
-      tools: filteredTools,
+      tools: llmTools,
       maxTokens: 4096,
     })
 
     let accumulatedContent: MessageContent[] = []
     let accumulatedText = ''
     let usage = { inputTokens: 0, outputTokens: 0 }
+    let yieldsCount = 0
 
     for await (const event of stream) {
       // Check abort
@@ -926,6 +835,7 @@ async function* handleLocalAction(
       // Convert and yield stream events
       const streamEvent = convertToStreamEvent(event, decision.model)
       if (streamEvent) {
+        yieldsCount++
         yield streamEvent
       }
 
@@ -960,16 +870,39 @@ async function* handleLocalAction(
       accumulatedContent = [{ type: 'text', text: accumulatedText }]
     }
 
-    routerLog(`handleLocalAction result: ${accumulatedContent.length} content blocks`)
-    for (const c of accumulatedContent) {
-      if (c.type === 'tool_use') {
-        routerLog(`  TOOL_USE: ${c.name} input=${JSON.stringify(c.input).substring(0, 200)}`)
-      } else if (c.type === 'text') {
-        routerLog(`  TEXT: ${(c.text || '').substring(0, 200)}`)
+    // Log response summary prominently
+    routerLog(`\n📤 MODEL RESPONSE:`, 'success')
+    const toolUses = accumulatedContent.filter(c => c.type === 'tool_use')
+    const textBlocks = accumulatedContent.filter(c => c.type === 'text')
+    
+    if (toolUses.length > 0) {
+      routerLog(`   🔧 TOOL CALLS: ${toolUses.length}`, 'success')
+      for (const c of toolUses) {
+        if (c.type === 'tool_use') {
+          const inputPreview = JSON.stringify(c.input).substring(0, 100)
+          routerLog(`      → ${c.name}(${inputPreview}...)`, 'info')
+        }
       }
     }
+    
+    if (textBlocks.length > 0) {
+      for (const c of textBlocks) {
+        if (c.type === 'text' && c.text) {
+          const preview = c.text.substring(0, 150).replace(/\n/g, ' ')
+          routerLog(`   💬 TEXT: "${preview}${c.text.length > 150 ? '...' : ''}"`, 'info')
+        }
+      }
+    }
+    
+    if (toolUses.length === 0 && textBlocks.length > 0) {
+      routerLog(`   ⚠️  Model responded with text only (no tool calls)`, 'warn')
+    }
+    
+    routerLog(`   Tokens: ${usage.inputTokens} in / ${usage.outputTokens} out`, 'debug')
+    routerLog(`[STREAM] Total stream events yielded: ${yieldsCount}`, 'info')
 
     // Yield final assistant message
+    routerLog(`[STREAM] Yielding final AssistantMessage`, 'success')
     yield createAssistantMessage(accumulatedContent, decision.model, usage)
     recordLocalCall(usage.inputTokens + usage.outputTokens)
 

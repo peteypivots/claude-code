@@ -1,0 +1,1 @@
+{"type":"pattern","name":"LLM API Handler","description":"QueryEngine.ts (~46K lines) handles LLM API calls: streaming, tool loops, thinking mode, retries, token counting. Supports multiple providers via deps.ts injection. LOCAL_FIRST env enables compound AI routing through Ollama.","classification":"tactical","recorded_at":"2026-04-02T03:03:59.863Z","id":"mx-78b32b"}

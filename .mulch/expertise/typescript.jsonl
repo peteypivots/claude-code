@@ -1,0 +1,1 @@
+{"type":"convention","content":"Uses ESM imports with explicit .js extensions (e.g., from './commands.js'). Files use kebab-case, classes PascalCase, functions camelCase, constants UPPER_SNAKE_CASE. Linter is Biome (not ESLint).","classification":"tactical","recorded_at":"2026-04-02T03:02:58.105Z","id":"mx-4498fe"}

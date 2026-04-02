@@ -117,6 +117,10 @@ export class LLMRouter implements ILLMProvider {
   async *stream(
     options: LLMRequestOptions,
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
+    // Always log LLMRouter.stream calls for debugging
+    const toolCount = options.tools?.length || 0
+    console.error(`[LLMRouter] stream() called: model=${options.model}, tools=${toolCount}`)
+    
     if (this.config.logProvider) {
       logForDebugging(
         `LLMRouter.stream: model=${options.model}, provider=${this.router.getName()}`,

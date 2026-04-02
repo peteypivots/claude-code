@@ -51,6 +51,11 @@ services:
       ORCHESTRATOR_TEMP_STEP: ${ORCHESTRATOR_TEMP_STEP:-0.2}
       ORCHESTRATOR_MAX_TEMP: ${ORCHESTRATOR_MAX_TEMP:-0.7}
       
+      # ── Reasoning Configuration (problem-type temps + caching) ──
+      REASONING_BASE_TEMP: ${REASONING_BASE_TEMP:-0.1}
+      REASONING_CACHE_TTL_MS: ${REASONING_CACHE_TTL_MS:-1800000}
+      REASONING_CACHE_ENABLED: ${REASONING_CACHE_ENABLED:-true}
+      
       # ── Context Window ─────────────────────────────────
       # Don't set by default - let each model's Modelfile control its context size
       # Set explicitly only if you need to override (e.g., OLLAMA_NUM_CTX=8192)
@@ -59,6 +64,9 @@ services:
       OLLAMA_MINIMAL_TOOL_DESC: ${OLLAMA_MINIMAL_TOOL_DESC:-false}
       # Debug: log raw Ollama responses
       OLLAMA_DEBUG: ${OLLAMA_DEBUG:-true}
+      OLLAMA_DEBUG_FULL_REQUEST: ${OLLAMA_DEBUG_FULL_REQUEST:-true}
+      OLLAMA_DEBUG_LOG_FILE: ${OLLAMA_DEBUG_LOG_FILE:-/data/logs/router-debug.log}
+      OLLAMA_DEBUG_UI_LOG_FILE: ${OLLAMA_DEBUG_UI_LOG_FILE:-/data/logs/claude-debug.log}
       OLLAMA_MODEL_SONNET: ${OLLAMA_MODEL_SONNET:-}
       OLLAMA_MODEL_HAIKU: ${OLLAMA_MODEL_HAIKU:-}
     
@@ -72,6 +80,7 @@ services:
       
       # Claude Code data persistence
       - claude-data:/data
+      - ./.docker-persist/logs:/data/logs
       - claude-home:/root/.claude
       - claude-config:/root/.config/claude
       - claude-cache:/root/.cache/claude
@@ -81,6 +90,14 @@ services:
       # SSH/Git keys (optional)
       - ~/.ssh:/root/.ssh:ro
       - ~/.gitconfig:/root/.gitconfig:ro
+      
+      # os-eco integration (canopy prompts, mulch expertise, seeds issues, overstory orchestration)
+      - ./.canopy:/app/.canopy:ro
+      - ./.mulch:/app/.mulch       # rw needed for mulch learn/sync
+      - ./.seeds:/app/.seeds       # rw needed for sd close/create
+      - ./.overstory:/app/.overstory  # rw needed for ov logs
+      - ./.claude:/app/.claude
+      - ./.git:/app/.git:ro        # git repo for mulch diff, sd sync
     
     # ── Logging Configuration ──────────────────────────────
     logging:

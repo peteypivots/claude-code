@@ -62,8 +62,26 @@ export async function* wrapProviderStreamForQueryModel(
  * Returns true if:
  * - Ollama is explicitly enabled via CLAUDE_LLM_PROVIDER or OLLAMA_BASE_URL
  * - The provider abstraction is available and functional
+ * 
+ * NOTE: When LOCAL_FIRST or OLLAMA_BASE_URL is set, the main query path uses
+ * queryModelWithRouting (via deps.callModel) which handles local routing properly.
+ * This function is called by queryModelWithStreaming for OTHER callers (like
+ * WebSearchTool's Anthropic fallback). To avoid duplicate Ollama requests,
+ * we now return false when local-first routing is active - those other paths
+ * should either use SearXNG (WebSearchTool) or fall through to Anthropic.
  */
 export async function shouldUseProviderAbstraction(): Promise<boolean> {
+  // DISABLED: When local-first routing is active via queryModelWithRouting,
+  // this path creates duplicate Ollama requests. The main query loop already
+  // routes to Ollama via handleLocalAction(). Other callers (like WebSearchTool)
+  // should use their own local backends (SearXNG) or fall through to Anthropic.
+  // 
+  // To re-enable this path for non-main-loop callers, we'd need to coordinate
+  // with queryModelWithRouting to avoid the double-call issue.
+  if (process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true') {
+    return false;
+  }
+
   if (!isOllamaEnabled()) {
     return false;
   }

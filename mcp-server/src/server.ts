@@ -82,7 +82,16 @@ async function walkFiles(root: string, rel = ""): Promise<string[]> {
 
 /** Safely resolve a user-supplied relative path under SRC_ROOT (blocks path traversal). */
 function safePath(relPath: string): string | null {
-  const resolved = path.resolve(SRC_ROOT, relPath);
+  // Normalize: strip leading `src/` if SRC_ROOT already ends with `/src`
+  // This handles user requests like `src/tools/AgentTool` when SRC_ROOT is `/app/src`
+  let normalized = relPath;
+  if (SRC_ROOT.endsWith('/src') || SRC_ROOT.endsWith('\\src')) {
+    if (normalized.startsWith('src/') || normalized.startsWith('src\\')) {
+      normalized = normalized.slice(4);
+    }
+  }
+  
+  const resolved = path.resolve(SRC_ROOT, normalized);
   if (!resolved.startsWith(SRC_ROOT)) return null;
   return resolved;
 }

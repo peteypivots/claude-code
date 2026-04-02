@@ -1,0 +1,1 @@
+{"type":"convention","content":"Commands are slash commands (e.g., /commit, /review) in src/commands/<command-name>/ directories. Command names use kebab-case for directories. Commands export via index.ts files. Implementation in the main command file, UI in separate components.","classification":"tactical","recorded_at":"2026-04-02T02:16:08.838Z","id":"mx-5c665b"}

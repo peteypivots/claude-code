@@ -67,78 +67,98 @@ Be concise. Output only valid JSON.`
 // Few-Shot Examples
 // ============================================================================
 
-export const ROUTING_FEW_SHOT_EXAMPLES = [
-  // Simple local tasks
-  {
-    user: 'What is the capital of France?',
-    context: { toolCount: 5, depth: 2 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Simple factual question","confidence":0.95,"suggestedTool":null}',
-  },
-  {
-    user: 'Format this JSON: {"a":1,"b":2}',
-    context: { toolCount: 3, depth: 1 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Code formatting task","confidence":0.98,"suggestedTool":null}',
-  },
-  {
-    user: 'Read the file src/main.ts and tell me what it does',
-    context: { toolCount: 10, depth: 3 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"File read and summarize","confidence":0.90,"suggestedTool":"Read"}',
-  },
-  {
-    user: 'What is the weather in Seattle tomorrow?',
-    context: { toolCount: 33, depth: 1 },
-    response: '{ "action":"local","model":"qwen2.5:7b-instruct","reasoning":"Real-time info query, use web search tool","confidence":0.92,"suggestedTool":"WebSearch"}',
-  },
-  {
-    user: 'Look up the latest Node.js release notes',
-    context: { toolCount: 33, depth: 2 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Web lookup task","confidence":0.90,"suggestedTool":"WebFetch"}',
-  },
-  {
-    user: 'Search the codebase for how authentication works',
-    context: { toolCount: 33, depth: 1 },
-    response: '{"action":"local","model":"qwen2.5:7b-instruct","reasoning":"Code search task, tool count does not matter","confidence":0.93,"suggestedTool":"Grep"}',
-  },
-  
-  // Reasoning tasks
-  {
-    user: 'Calculate the optimal route visiting 5 cities with these distances: A-B:10, A-C:15, B-C:12, B-D:8, C-D:6, C-E:9, D-E:5',
-    context: { toolCount: 5, depth: 1 },
-    response: '{"action":"reason","model":"deepseek-r1:7b","reasoning":"Traveling salesman optimization requires step-by-step reasoning","confidence":0.92,"suggestedTool":null}',
-  },
-  {
-    user: 'I have 3 boxes. Box A has 2 red and 3 blue balls. Box B has 4 red and 1 blue. If I pick one ball from each box, what\'s the probability both are red?',
-    context: { toolCount: 8, depth: 2 },
-    response: '{"action":"reason","model":"deepseek-r1:7b","reasoning":"Probability calculation needs careful step-by-step math","confidence":0.95,"suggestedTool":null}',
-  },
-  {
-    user: 'Plan out how to refactor this function to be more efficient, considering memory usage and time complexity',
-    context: { toolCount: 12, depth: 5 },
-    response: '{"action":"reason","model":"deepseek-r1:7b","reasoning":"Multi-factor optimization planning","confidence":0.88,"suggestedTool":"Read"}',
-  },
+// Model names from env (read at runtime so they pick up configured values)
+const getLocalModelName = () => process.env.LOCAL_MODEL || 'qwen2.5:7b-instruct'
+const getReasonModelName = () => process.env.REASONING_MODEL || 'deepseek-r1:7b'
+const getEscalateModelName = () => process.env.ESCALATION_MODEL || 'claude-sonnet-4-20250514'
 
-  // Escalation tasks
-  {
-    user: 'Architect a new microservices system for handling 1M requests/second with proper security, caching, and failover',
-    context: { toolCount: 33, depth: 1 },
-    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Complex architecture requiring deep expertise and creative design","confidence":0.95,"suggestedTool":null}',
-  },
-  {
-    user: 'Review this code for security vulnerabilities and suggest fixes',
-    context: { toolCount: 15, depth: 8 },
-    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Security review requires careful analysis by stronger model","confidence":0.93,"suggestedTool":"Read"}',
-  },
-  {
-    user: 'I\'m not sure what I need, but something feels wrong with how the app handles user sessions',
-    context: { toolCount: 10, depth: 4 },
-    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Ambiguous intent requires clarification by capable model","confidence":0.85,"suggestedTool":null}',
-  },
-  {
-    user: 'Write a creative story about a robot learning to feel emotions',
-    context: { toolCount: 3, depth: 1 },
-    response: '{"action":"escalate","model":"claude-sonnet-4-20250514","reasoning":"Creative writing benefits from stronger model","confidence":0.90,"suggestedTool":null}',
-  },
-]
+// Generate few-shot examples with configured model names
+function generateFewShotExamples() {
+  const localModel = getLocalModelName()
+  const reasonModel = getReasonModelName()
+  const escalateModel = getEscalateModelName()
+  
+  return [
+    // Simple local tasks
+    {
+      user: 'What is the capital of France?',
+      context: { toolCount: 5, depth: 2 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"Simple factual question","confidence":0.95,"suggestedTool":null}`,
+    },
+    {
+      user: 'Format this JSON: {"a":1,"b":2}',
+      context: { toolCount: 3, depth: 1 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"Code formatting task","confidence":0.98,"suggestedTool":null}`,
+    },
+    {
+      user: 'Read the file src/main.ts and tell me what it does',
+      context: { toolCount: 10, depth: 3 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"File read and summarize","confidence":0.90,"suggestedTool":"Read"}`,
+    },
+    {
+      user: 'What is the weather in Seattle tomorrow?',
+      context: { toolCount: 33, depth: 1 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"Real-time info query, use web search tool","confidence":0.92,"suggestedTool":"WebSearch"}`,
+    },
+    {
+      user: 'Look up the latest Node.js release notes',
+      context: { toolCount: 33, depth: 2 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"Web lookup task","confidence":0.90,"suggestedTool":"WebFetch"}`,
+    },
+    {
+      user: 'Search the codebase for how authentication works',
+      context: { toolCount: 33, depth: 1 },
+      response: `{"action":"local","model":"${localModel}","reasoning":"Code search task, tool count does not matter","confidence":0.93,"suggestedTool":"Grep"}`,
+    },
+    
+    // Reasoning tasks
+    {
+      user: 'Calculate the optimal route visiting 5 cities with these distances: A-B:10, A-C:15, B-C:12, B-D:8, C-D:6, C-E:9, D-E:5',
+      context: { toolCount: 5, depth: 1 },
+      response: `{"action":"reason","model":"${reasonModel}","reasoning":"Traveling salesman optimization requires step-by-step reasoning","confidence":0.92,"suggestedTool":null}`,
+    },
+    {
+      user: 'I have 3 boxes. Box A has 2 red and 3 blue balls. Box B has 4 red and 1 blue. If I pick one ball from each box, what\'s the probability both are red?',
+      context: { toolCount: 8, depth: 2 },
+      response: `{"action":"reason","model":"${reasonModel}","reasoning":"Probability calculation needs careful step-by-step math","confidence":0.95,"suggestedTool":null}`,
+    },
+    {
+      user: 'Plan out how to refactor this function to be more efficient, considering memory usage and time complexity',
+      context: { toolCount: 12, depth: 5 },
+      response: `{"action":"reason","model":"${reasonModel}","reasoning":"Multi-factor optimization planning","confidence":0.88,"suggestedTool":"Read"}`,
+    },
+
+    // Escalation tasks
+    {
+      user: 'Architect a new microservices system for handling 1M requests/second with proper security, caching, and failover',
+      context: { toolCount: 33, depth: 1 },
+      response: `{"action":"escalate","model":"${escalateModel}","reasoning":"Complex architecture requiring deep expertise and creative design","confidence":0.95,"suggestedTool":null}`,
+    },
+    {
+      user: 'Review this code for security vulnerabilities and suggest fixes',
+      context: { toolCount: 15, depth: 8 },
+      response: `{"action":"escalate","model":"${escalateModel}","reasoning":"Security review requires careful analysis by stronger model","confidence":0.93,"suggestedTool":"Read"}`,
+    },
+    {
+      user: 'I\'m not sure what I need, but something feels wrong with how the app handles user sessions',
+      context: { toolCount: 10, depth: 4 },
+      response: `{"action":"escalate","model":"${escalateModel}","reasoning":"Ambiguous intent requires clarification by capable model","confidence":0.85,"suggestedTool":null}`,
+    },
+    {
+      user: 'Write a creative story about a robot learning to feel emotions',
+      context: { toolCount: 3, depth: 1 },
+      response: `{"action":"escalate","model":"${escalateModel}","reasoning":"Creative writing benefits from stronger model","confidence":0.90,"suggestedTool":null}`,
+    },
+  ]
+}
+
+// Export getter function (reads env vars at call time)
+export function getRoutingFewShotExamples() {
+  return generateFewShotExamples()
+}
+
+// Legacy export for backward compat (evaluated once at module load)
+export const ROUTING_FEW_SHOT_EXAMPLES = generateFewShotExamples()
 
 // ============================================================================
 // Prompt Builder
@@ -181,9 +201,10 @@ export function buildRoutingPrompt(context: RoutingContext): string {
 
 /**
  * Build few-shot examples string for prompt
+ * Uses getRoutingFewShotExamples() to get current env-configured model names
  */
 export function buildFewShotExamples(): string {
-  return ROUTING_FEW_SHOT_EXAMPLES.map(ex => {
+  return getRoutingFewShotExamples().map(ex => {
     const contextStr = `[depth:${ex.context.depth}]`
     return `User ${contextStr}: ${ex.user}\nResponse: ${ex.response}`
   }).join('\n\n')

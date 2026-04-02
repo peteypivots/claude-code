@@ -1,0 +1,1 @@
+{"type":"pattern","name":"System Prompt Building","description":"context.ts collects OS, shell, git, and user context. systemPrompt.ts:buildEffectiveSystemPrompt() assembles final prompt, calling getCoordinatorSystemPrompt() when coordinator mode is active (via COORDINATOR_MODE feature flag).","classification":"tactical","recorded_at":"2026-04-02T03:04:24.409Z","id":"mx-e741bd"}

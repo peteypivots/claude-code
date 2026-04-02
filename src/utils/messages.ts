@@ -2950,10 +2950,25 @@ export function handleMessageFromStream(
   onApiMetrics?: (metrics: { ttftMs: number }) => void,
   onStreamingText?: (f: (current: string | null) => string | null) => void,
 ): void {
+  // Debug: log all incoming messages
+  if (process.env.OLLAMA_DEBUG === 'true') {
+    console.error(`[handleMessageFromStream] Received message type=${message.type}`)
+  }
+  
   if (
     message.type !== 'stream_event' &&
     message.type !== 'stream_request_start'
   ) {
+    // Debug: log non-stream messages that will be displayed
+    if (process.env.OLLAMA_DEBUG === 'true') {
+      console.error(`[handleMessageFromStream] Non-stream message, calling onMessage()`)
+      if (message.type === 'assistant') {
+        const content = message.message?.content || []
+        const textContent = content.find((c: any) => c.type === 'text')
+        console.error(`[handleMessageFromStream] Assistant text: "${(textContent as any)?.text?.substring(0, 80) || 'none'}"`)
+      }
+    }
+    
     // Handle tombstone messages - remove the targeted message instead of adding
     if (message.type === 'tombstone') {
       onTombstone?.(message.message)
@@ -3052,6 +3067,10 @@ export function handleMessageFromStream(
       switch (message.event.delta.type) {
         case 'text_delta': {
           const deltaText = message.event.delta.text
+          // Debug: log that we're receiving stream text
+          if (process.env.OLLAMA_DEBUG === 'true') {
+            console.error(`[handleMessageFromStream] text_delta: "${deltaText.substring(0, 30)}"`)
+          }
           onUpdateLength(deltaText)
           onStreamingText?.(text => (text ?? '') + deltaText)
           return

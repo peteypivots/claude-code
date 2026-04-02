@@ -3,8 +3,14 @@
  * 
  * Provides chain-of-thought reasoning as a service.
  * Called by the orchestrator when tasks require step-by-step analysis.
+ * 
+ * Features:
+ * - Problem-type-based temperature selection
+ * - Reasoning chain cache with TTL for reuse
+ * - Similar-problem recall to bootstrap reasoning
  */
 
+import { createHash } from 'crypto'
 import { OllamaProvider } from './ollamaClient.js'
 import type { LLMResponse } from './types.js'
 
@@ -12,15 +18,31 @@ import type { LLMResponse } from './types.js'
 // Types
 // ============================================================================
 
+/** Problem types with corresponding temperature settings */
+export type ProblemType = 
+  | 'math'       // Fully deterministic
+  | 'logic'      // Deterministic
+  | 'debugging'  // Slight creativity for edge cases
+  | 'planning'   // Needs some creativity
+  | 'analysis'   // Similar to planning
+  | 'tradeoffs'  // Most creativity
+  | 'general'    // Default
+
 export interface ReasoningRequest {
   /** The problem to reason through */
   problem: string
+  /** Type of problem (affects temperature selection) */
+  problemType?: ProblemType
   /** Optional constraints to consider */
   constraints?: string[]
   /** Context from prior conversation */
   context?: string
   /** Maximum tokens for reasoning trace (default: 2048) */
   maxTokens?: number
+  /** Override temperature (bypasses problem-type selection) */
+  temperature?: number
+  /** Skip cache lookup (force fresh reasoning) */
+  skipCache?: boolean
 }
 
 export interface ReasoningResult {
@@ -37,6 +59,10 @@ export interface ReasoningResult {
     inputTokens: number
     outputTokens: number
   }
+  /** Whether this was served from cache */
+  fromCache?: boolean
+  /** Prior reasoning that influenced this result (if recalled) */
+  priorContext?: string
 }
 
 export interface ReasoningConfig {
@@ -48,13 +74,145 @@ export interface ReasoningConfig {
   timeout: number
   /** Enable verbose logging */
   verbose: boolean
+  /** Cache TTL in milliseconds (default: 30 minutes) */
+  cacheTtlMs: number
+  /** Base temperature for general problems */
+  baseTemperature: number
+  /** Enable caching */
+  cacheEnabled: boolean
 }
+
+// ============================================================================
+// Configuration
+// ============================================================================
 
 const DEFAULT_CONFIG: ReasoningConfig = {
   model: process.env.REASONING_MODEL || 'deepseek-r1:7b',
   baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-  timeout: parseInt(process.env.REASONING_TIMEOUT_MS || '60000', 10), // 60 seconds
+  timeout: parseInt(process.env.REASONING_TIMEOUT_MS || '60000', 10),
   verbose: process.env.REASONING_VERBOSE === 'true',
+  cacheTtlMs: parseInt(process.env.REASONING_CACHE_TTL_MS || '1800000', 10), // 30 minutes
+  baseTemperature: parseFloat(process.env.REASONING_BASE_TEMP || '0.1'),
+  cacheEnabled: process.env.REASONING_CACHE_ENABLED !== 'false',
+}
+
+/**
+ * Temperature by problem type
+ * - Lower = more deterministic (math, logic)
+ * - Higher = more creative exploration (tradeoffs, planning)
+ */
+const PROBLEM_TYPE_TEMPS: Record<ProblemType, number> = {
+  math: 0.0,        // Fully deterministic
+  logic: 0.0,       // Deterministic
+  debugging: 0.1,   // Slight creativity for edge cases
+  planning: 0.2,    // Needs some creativity
+  analysis: 0.2,    // Similar to planning
+  tradeoffs: 0.3,   // Most creativity
+  general: parseFloat(process.env.REASONING_BASE_TEMP || '0.1'),
+}
+
+// ============================================================================
+// Reasoning Cache
+// ============================================================================
+
+interface CacheEntry {
+  result: ReasoningResult
+  expires: number
+  problemHash: string
+}
+
+const reasoningCache = new Map<string, CacheEntry>()
+
+/**
+ * Generate cache key from problem and type
+ */
+function getCacheKey(problem: string, problemType?: ProblemType): string {
+  const payload = {
+    problem: problem.slice(0, 1000), // First 1000 chars
+    type: problemType || 'general',
+  }
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
+}
+
+/**
+ * Get cached reasoning result if available and not expired
+ */
+function getCached(key: string, config: ReasoningConfig): ReasoningResult | null {
+  if (!config.cacheEnabled) return null
+  
+  const entry = reasoningCache.get(key)
+  if (!entry) return null
+  
+  if (Date.now() > entry.expires) {
+    reasoningCache.delete(key)
+    return null
+  }
+  
+  if (config.verbose) {
+    console.log(`[Reasoning] Cache HIT for key ${key}`)
+  }
+  
+  return entry.result
+}
+
+/**
+ * Store reasoning result in cache
+ */
+function setCache(key: string, result: ReasoningResult, config: ReasoningConfig): void {
+  if (!config.cacheEnabled) return
+  
+  reasoningCache.set(key, {
+    result,
+    expires: Date.now() + config.cacheTtlMs,
+    problemHash: key,
+  })
+  
+  // Prune old entries (simple LRU-ish behavior)
+  if (reasoningCache.size > 500) {
+    const oldest = reasoningCache.keys().next().value
+    if (oldest) reasoningCache.delete(oldest)
+  }
+  
+  if (config.verbose) {
+    console.log(`[Reasoning] Cached result for key ${key} (${reasoningCache.size} entries)`)
+  }
+}
+
+/**
+ * Clear the reasoning cache
+ */
+export function clearReasoningCache(): void {
+  reasoningCache.clear()
+}
+
+/**
+ * Get cache statistics
+ */
+export function getReasoningCacheStats(): { size: number; ttlMs: number } {
+  return {
+    size: reasoningCache.size,
+    ttlMs: DEFAULT_CONFIG.cacheTtlMs,
+  }
+}
+
+/**
+ * Recall prior reasoning for a similar problem
+ * Returns the reasoning chain and confidence if a high-confidence match exists
+ */
+export function recallSimilarReasoning(
+  problem: string,
+  problemType?: ProblemType,
+): { reasoning: string; confidence: number } | null {
+  const key = getCacheKey(problem, problemType)
+  const entry = reasoningCache.get(key)
+  
+  if (entry && Date.now() < entry.expires && entry.result.confidence > 0.5) {
+    return {
+      reasoning: entry.result.reasoning,
+      confidence: entry.result.confidence,
+    }
+  }
+  return null
 }
 
 // ============================================================================
@@ -108,6 +266,11 @@ function getReasoningProvider(config: ReasoningConfig): OllamaProvider {
 
 /**
  * Run reasoning on a problem using DeepSeek-R1
+ * 
+ * Features:
+ * - Automatic temperature selection based on problem type
+ * - Cache lookup for previously solved problems
+ * - Prior reasoning recall to bootstrap new problems
  */
 export async function reason(
   request: ReasoningRequest,
@@ -116,12 +279,43 @@ export async function reason(
   const fullConfig = { ...DEFAULT_CONFIG, ...config }
   const provider = getReasoningProvider(fullConfig)
 
+  // Check cache first (unless skipCache)
+  if (!request.skipCache) {
+    const cacheKey = getCacheKey(request.problem, request.problemType)
+    const cached = getCached(cacheKey, fullConfig)
+    if (cached) {
+      return { ...cached, fromCache: true }
+    }
+  }
+
+  // Determine temperature based on problem type (or use override)
+  const temperature = request.temperature ?? PROBLEM_TYPE_TEMPS[request.problemType || 'general']
+
+  // Check for similar prior reasoning to include as context
+  let enhancedContext = request.context || ''
+  let priorContext: string | undefined
+
+  const priorReasoning = recallSimilarReasoning(request.problem, request.problemType)
+  if (priorReasoning && priorReasoning.confidence > 0.6) {
+    priorContext = `Similar problem solved before (confidence ${(priorReasoning.confidence * 100).toFixed(0)}%):\n${priorReasoning.reasoning.slice(0, 500)}\nAdapt this approach if relevant.`
+    enhancedContext = enhancedContext
+      ? `${enhancedContext}\n\n${priorContext}`
+      : priorContext
+  }
+
   // Build the prompt
-  const prompt = buildReasoningPrompt(request)
+  const prompt = buildReasoningPrompt({
+    ...request,
+    context: enhancedContext,
+  })
 
   if (fullConfig.verbose) {
     console.log(`[Reasoning] Starting reasoning with ${fullConfig.model}...`)
+    console.log(`[Reasoning] Problem type: ${request.problemType || 'general'}, temp: ${temperature}`)
     console.log(`[Reasoning] Problem: ${request.problem.slice(0, 100)}...`)
+    if (priorContext) {
+      console.log(`[Reasoning] Using prior reasoning as context`)
+    }
   }
 
   const startTime = Date.now()
@@ -131,13 +325,24 @@ export async function reason(
     messages: [{ role: 'user', content: prompt }],
     systemPrompt: REASONING_SYSTEM_PROMPT,
     maxTokens: request.maxTokens ?? 2048,
-    temperature: 0, // Deterministic reasoning
+    temperature,
   })
 
   const durationMs = Date.now() - startTime
 
   // Parse the response
   const result = parseReasoningResponse(response, durationMs)
+  
+  // Add prior context reference if used
+  if (priorContext) {
+    result.priorContext = priorContext
+  }
+
+  // Cache result (only if confidence > 0.5)
+  if (result.confidence > 0.5) {
+    const cacheKey = getCacheKey(request.problem, request.problemType)
+    setCache(cacheKey, result, fullConfig)
+  }
 
   if (fullConfig.verbose) {
     console.log(`[Reasoning] Completed in ${durationMs}ms`)
@@ -157,6 +362,9 @@ export async function* reasonStream(
   const fullConfig = { ...DEFAULT_CONFIG, ...config }
   const provider = getReasoningProvider(fullConfig)
 
+  // Determine temperature based on problem type (or use override)
+  const temperature = request.temperature ?? PROBLEM_TYPE_TEMPS[request.problemType || 'general']
+
   const prompt = buildReasoningPrompt(request)
 
   let buffer = ''
@@ -168,7 +376,7 @@ export async function* reasonStream(
     messages: [{ role: 'user', content: prompt }],
     systemPrompt: REASONING_SYSTEM_PROMPT,
     maxTokens: request.maxTokens ?? 2048,
-    temperature: 0,
+    temperature,
   })) {
     if (event.type === 'content_block_delta' && event.delta?.text) {
       buffer += event.delta.text
@@ -329,4 +537,4 @@ export async function isReasoningAvailable(
 // Exports
 // ============================================================================
 
-export { DEFAULT_CONFIG as REASONING_CONFIG }
+export { DEFAULT_CONFIG as REASONING_CONFIG, PROBLEM_TYPE_TEMPS }

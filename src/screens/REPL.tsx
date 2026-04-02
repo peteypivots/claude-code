@@ -2790,6 +2790,16 @@ export function REPL({
     resetTurnHookDuration();
     resetTurnToolDuration();
     resetTurnClassifierDuration();
+    // Debug: log query start
+    if (process.env.OLLAMA_DEBUG === 'true') {
+      console.error(`[REPL.tsx] Starting query loop...`);
+      const { appendFileSync, mkdirSync } = require('fs');
+      const { dirname } = require('path');
+      const debugLogPath = process.env.OLLAMA_DEBUG_UI_LOG_FILE || '/data/logs/claude-debug.log';
+      mkdirSync(dirname(debugLogPath), { recursive: true });
+      appendFileSync(debugLogPath, `[REPL.tsx] Starting query loop...\n`);
+    }
+    let eventCount = 0;
     for await (const event of query({
       messages: messagesIncludingNewMessages,
       systemPrompt,
@@ -2799,7 +2809,26 @@ export function REPL({
       toolUseContext,
       querySource: getQuerySourceForREPL()
     })) {
+      eventCount++;
+      // Debug: log each event
+      if (process.env.OLLAMA_DEBUG === 'true') {
+        console.error(`[REPL.tsx] Received event #${eventCount}: type=${event.type}`);
+        const { appendFileSync, mkdirSync } = require('fs');
+        const { dirname } = require('path');
+        const debugLogPath = process.env.OLLAMA_DEBUG_UI_LOG_FILE || '/data/logs/claude-debug.log';
+        mkdirSync(dirname(debugLogPath), { recursive: true });
+        appendFileSync(debugLogPath, `[REPL.tsx] Received event #${eventCount}: type=${event.type}\n`);
+      }
       onQueryEvent(event);
+    }
+    // Debug: log query complete
+    if (process.env.OLLAMA_DEBUG === 'true') {
+      console.error(`[REPL.tsx] Query loop complete, received ${eventCount} events`);
+      const { appendFileSync, mkdirSync } = require('fs');
+      const { dirname } = require('path');
+      const debugLogPath = process.env.OLLAMA_DEBUG_UI_LOG_FILE || '/data/logs/claude-debug.log';
+      mkdirSync(dirname(debugLogPath), { recursive: true });
+      appendFileSync(debugLogPath, `[REPL.tsx] Query loop complete, received ${eventCount} events\n`);
     }
     if (feature('BUDDY')) {
       void fireCompanionObserver(messagesRef.current, reaction => setAppState(prev => prev.companionReaction === reaction ? prev : {
