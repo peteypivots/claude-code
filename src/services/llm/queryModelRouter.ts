@@ -891,8 +891,18 @@ async function* handleLocalAction(
       }
     }
 
-    // Use compact local system prompt instead of the full 29KB Claude prompt
-    let systemPromptText = getLocalSystemPrompt()
+    // Use compact local system prompt instead of the full 29KB Claude prompt.
+    // Check for LOCAL_SYSTEM_PROMPT env var (set by research/agent modes),
+    // then canopy cache file, then built-in fallback.
+    let systemPromptText: string
+    const envPrompt = process.env.LOCAL_SYSTEM_PROMPT
+    if (envPrompt && envPrompt.length > 50) {
+      systemPromptText = envPrompt
+      routerLog(`Using LOCAL_SYSTEM_PROMPT env override for local model (${envPrompt.length} chars)`)
+    } else {
+      systemPromptText = getLocalSystemPrompt()
+      routerLog(`SystemPrompt for local model: length=${systemPromptText.length} (canopy-managed)`)
+    }
 
     // Append RAG context from past high-quality examples if available
     const ragCtx = (params as any)?._ragContext as string | undefined
@@ -900,8 +910,6 @@ async function* handleLocalAction(
       systemPromptText += ragCtx
       routerLog(`SystemPrompt augmented with RAG context (+${ragCtx.length} chars)`)
     }
-
-    routerLog(`SystemPrompt for local model: length=${systemPromptText.length} (canopy-managed)`)
 
     // If the orchestrator suggested a tool, hint the model to use it
     if (decision.suggestedTool) {

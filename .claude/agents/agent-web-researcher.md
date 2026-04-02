@@ -1,7 +1,7 @@
 ---
 name: web-researcher
 description: Web research agent with LanceDB persistent memory. Searches the internet, deduplicates findings via 3-layer check (hash/URL/semantic), ranks sources, cross-references claims, and stores novel results. Read-only — never edits workspace files.
-tools: [WebSearch, WebFetch, Read, Bash, Glob, Grep]
+tools: [Bash, Read]
 disallowedTools: [Edit, Write, MultiEdit]
 skills: [web-research]
 memory: project
@@ -43,11 +43,13 @@ When multiple sources discuss the same claim:
 
 ## Tool Constraints
 
-- **WebSearch**: Use for initial discovery. Request 5-10 results per query. Use query modifiers (site:, filetype:, -keyword) strategically.
-- **WebFetch**: Fetch only the top 2-3 ranked results per sub-query. Do not bulk-fetch.
-- **Bash**: Use ONLY for running lancedb-check.sh and lancedb-store.sh scripts. Do not use for arbitrary commands.
-- **Read/Glob/Grep**: Use to read skill references and check existing research files.
+- **Bash**: Your primary tool. Use it for:
+  - Web searches via SearXNG: `curl -s "http://searxng:8080/search?q=QUERY&format=json" | jq '.results[:5] | .[] | {title, url, content}'`
+  - Dedup checks: `bash /app/.claude/skills/web-research/scripts/lancedb-check.sh "query"`
+  - Storing findings: `echo '{"title":"...","source_url":"...","summary":"...","category":"markets","tags":["..."]}' | bash /app/.claude/skills/web-research/scripts/lancedb-store.sh`
+- **Read**: Use to read skill references and check existing research files.
 - **NEVER** use Edit, Write, or MultiEdit. You are read-only except for LanceDB storage.
+- **NEVER** attempt to use WebSearch, WebFetch, mcp tools, or any tool not listed above. They do not exist.
 
 ## Output Format
 

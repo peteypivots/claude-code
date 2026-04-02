@@ -32,7 +32,7 @@ FROM oven/bun:1-alpine
 WORKDIR /app
 
 # Install OS-level runtime dependencies
-RUN apk add --no-cache git ripgrep curl jq
+RUN apk add --no-cache git ripgrep curl jq bash python3
 
 # Install os-eco tools globally (canopy, mulch, seeds, overstory)
 # These power the hook system for prompt management and expertise tracking

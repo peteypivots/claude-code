@@ -1,0 +1,83 @@
+# Market Monitor Queries
+# One query per line. Lines starting with # are ignored.
+# Hot-reloaded each cycle — edit while running.
+# Time modifiers (pre-market/intraday/after-hours) are appended automatically.
+
+# === Broad Market ===
+US stock market today S&P 500 Dow NASDAQ
+bond yields treasury 10Y 2Y yield curve
+VIX volatility index options market sentiment
+IPO market SPAC new listings 2026
+Wall Street earnings reports surprises misses
+
+# === Macro Economics ===
+Federal Reserve interest rate FOMC decision
+inflation CPI PPI consumer prices data
+GDP economic growth forecast recession risk
+unemployment jobs report nonfarm payrolls
+housing market home prices mortgage rates
+US fiscal policy debt ceiling budget deficit
+consumer confidence spending retail sales
+
+# === Equity Sectors ===
+tech stocks NASDAQ mega-cap AI cloud
+bank stocks financial sector stress deposits
+energy oil prices OPEC crude production
+pharmaceutical biotech FDA approvals pipeline
+semiconductor chip stocks AI demand supply
+defense stocks military spending contracts
+retail consumer spending e-commerce trends
+insurance industry catastrophe bonds climate
+
+# === Commodities ===
+gold silver precious metals prices
+crude oil WTI Brent natural gas prices
+copper lithium rare earth minerals
+agricultural commodities wheat corn soybeans
+carbon credits emissions trading market
+
+# === Crypto & Digital ===
+cryptocurrency bitcoin ethereum price
+DeFi stablecoins regulation SEC
+crypto ETF institutional adoption
+blockchain tokenization real world assets
+
+# === Fixed Income & Credit ===
+corporate bond spreads credit market high yield
+municipal bonds muni market rates
+emerging markets EM sovereign debt
+commercial real estate CMBS default
+
+# === Currencies & Forex ===
+dollar index DXY forex euro yen
+emerging market currencies carry trade
+central bank policy rate differential
+
+# === Alternative Assets ===
+private equity venture capital deals IPO
+commercial real estate office vacancy rates
+private credit direct lending market
+
+# === Geopolitical ===
+China trade tariffs supply chain decoupling
+geopolitical risk war sanctions market impact
+Middle East oil supply disruption risk
+EU economic policy regulation markets
+
+# === News Sources (daily check) ===
+Drudge Report top headlines today
+ZeroHedge financial news today
+Reuters breaking financial news markets
+Bloomberg markets economy today
+Financial Times top stories markets
+Wall Street Journal breaking news
+
+# === Thematic / Trending ===
+AI artificial intelligence stocks investment
+climate change ESG green energy stocks
+space industry satellite launch stocks
+nuclear energy uranium stocks revival
+reshoring manufacturing domestic production
+weight loss drugs GLP-1 market impact
+quantum computing investment stocks
+robotics automation labor market impact

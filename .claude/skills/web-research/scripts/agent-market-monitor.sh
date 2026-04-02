@@ -5,6 +5,13 @@
 #   INSTANCE=sports ./agent-market-monitor.sh
 #   INSTANCE=markets ./agent-market-monitor.sh
 #
+# Enable parallel workers (N concurrent agent invocations per batch):
+#   PARALLEL_WORKERS=3 ./agent-market-monitor.sh
+#
+# Combine both for maximum throughput:
+#   INSTANCE=sports PARALLEL_WORKERS=2 ./agent-market-monitor.sh &
+#   INSTANCE=markets PARALLEL_WORKERS=2 ./agent-market-monitor.sh &
+#
 # Stop: touch /tmp/agent-monitor-${INSTANCE:-default}-stop
 # Logs: /tmp/agent-monitor-${INSTANCE:-default}.log
 
@@ -30,6 +37,11 @@ CYCLE_DELAY=${CYCLE_DELAY:-300}  # 5 min between cycles
 QUERY_DELAY=${QUERY_DELAY:-10}   # 10s between queries (let model cool down)
 QUERIES_PER_CYCLE=${QUERIES_PER_CYCLE:-8}
 QUERY_FILE="${QUERY_FILE:-/app/.claude/skills/web-research/scripts/monitor-queries.txt}"
+
+# Parallel workers — set > 1 to run multiple queries simultaneously
+# Each worker is a separate agent invocation; distributes queries round-robin
+# WARNING: High values may overwhelm Ollama; recommended 2-4 for local models
+PARALLEL_WORKERS=${PARALLEL_WORKERS:-1}
 
 # Default queries embedded — used only if query file doesn't exist
 DEFAULT_QUERIES=(
@@ -329,8 +341,119 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
   echo "---" >> "$LOG"
 }
 
+# Run a single query in a worker subprocess (for parallel execution)
+# Args: query, worker_id, result_file
+run_worker_query() {
+  local query="$1"
+  local worker_id="$2"
+  local result_file="$3"
+
+  # Build a prompt that gives the model ONE bash command to run the full pipeline
+  local prompt="Use Bash to run this command:
+bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
+
+  local start_ms
+  start_ms=$(date +%s%3N)
+
+  local result
+  result=$(LOCAL_SYSTEM_PROMPT="$RESEARCH_PROMPT" \
+    LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
+    bun /app/cli.mjs \
+      --agent web-researcher \
+      --mcp-config /tmp/empty-mcp.json \
+      --dangerously-skip-permissions \
+      --output-format json \
+      -p "$prompt" 2>/dev/null)
+
+  local end_ms
+  end_ms=$(date +%s%3N)
+  local elapsed=$((end_ms - start_ms))
+
+  # Extract JSON result
+  local json_line
+  json_line=$(echo "$result" | grep '^{"type":"result"' | tail -1)
+  local answer
+  answer=$(echo "$json_line" | jq -r '.result // "no result"' 2>/dev/null || echo "parse error")
+  local turns
+  turns=$(echo "$json_line" | jq -r '.num_turns // 0' 2>/dev/null || echo "?")
+
+  # Detect text-only response
+  local used_tools=true
+  if [ "$turns" = "1" ]; then
+    used_tools=false
+  elif echo "$answer" | grep -qE "^Found \*\*|^I found|^Here are|relevant results"; then
+    if ! echo "$answer" | grep -qE "RESEARCH PIPELINE|STORED|DUPLICATE"; then
+      used_tools=false
+    fi
+  fi
+
+  if [ "$used_tools" = "false" ]; then
+    # Fallback: run pipeline directly
+    local fallback_result
+    fallback_result=$(bash /app/.claude/skills/web-research/scripts/research-pipeline.sh "$query" 2>/dev/null)
+    local stored
+    stored=$(echo "$fallback_result" | grep -c "STORED" || echo "0")
+    local dupes
+    dupes=$(echo "$fallback_result" | grep -c "DUPLICATE" || echo "0")
+    answer="[FALLBACK] stored=$stored, dupes=$dupes"
+    turns="fallback"
+  fi
+
+  # Write result to file for main process to collect
+  echo "W${worker_id}|${elapsed}ms|turns=${turns}|${query}|${answer:0:100}" >> "$result_file"
+}
+
+# Run queries in parallel across N workers
+# Args: array of queries (passed by name), worker count
+run_parallel_queries() {
+  local -n queries_ref=$1
+  local workers=$2
+  local result_file="/tmp/agent-monitor-${INSTANCE}-results-$$.txt"
+  rm -f "$result_file"
+  touch "$result_file"
+
+  local total=${#queries_ref[@]}
+  echo "[$(date)] Parallel mode: distributing $total queries across $workers workers" >> "$LOG"
+
+  # Track worker PIDs
+  local pids=()
+
+  # Distribute queries round-robin to workers
+  for ((w=0; w<workers; w++)); do
+    (
+      for ((i=w; i<total; i+=workers)); do
+        local q="${queries_ref[$i]}"
+        if [ -n "$q" ]; then
+          run_worker_query "$q" "$w" "$result_file"
+        fi
+      done
+    ) &
+    pids+=("$!")
+    echo "[$(date)]   Started worker $w (PID: $!)" >> "$LOG"
+  done
+
+  # Wait for all workers to complete
+  local failed=0
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
+      ((failed++))
+    fi
+  done
+
+  # Collect results
+  if [ -f "$result_file" ]; then
+    local completed
+    completed=$(wc -l < "$result_file")
+    echo "[$(date)] Parallel batch complete: $completed/$total queries, $failed worker failures" >> "$LOG"
+    while IFS= read -r line; do
+      echo "[$(date)]   $line" >> "$LOG"
+    done < "$result_file"
+    rm -f "$result_file"
+  fi
+}
+
 echo "=== Agent Market Monitor Started ===" >> "$LOG"
-echo "[$(date)] Cycle delay: ${CYCLE_DELAY}s | Queries/cycle: ${QUERIES_PER_CYCLE}" >> "$LOG"
+echo "[$(date)] Cycle delay: ${CYCLE_DELAY}s | Queries/cycle: ${QUERIES_PER_CYCLE} | Workers: ${PARALLEL_WORKERS}" >> "$LOG"
 
 cycle=0
 while true; do
@@ -371,19 +494,25 @@ while true; do
     done
   fi
 
-  echo "[$(date)] Running ${#selected[@]} queries this cycle" >> "$LOG"
+  echo "[$(date)] Running ${#selected[@]} queries this cycle (workers: $PARALLEL_WORKERS)" >> "$LOG"
 
-  for q in "${selected[@]}"; do
-    # Check stop signal between queries
-    if [ -f "$STOPFILE" ]; then
-      echo "[$(date)] Stop signal received mid-cycle. Exiting." >> "$LOG"
-      rm -f "$STOPFILE"
-      exit 0
-    fi
+  if [ "$PARALLEL_WORKERS" -gt 1 ]; then
+    # Parallel mode: distribute across workers
+    run_parallel_queries selected "$PARALLEL_WORKERS"
+  else
+    # Sequential mode (original behavior)
+    for q in "${selected[@]}"; do
+      # Check stop signal between queries
+      if [ -f "$STOPFILE" ]; then
+        echo "[$(date)] Stop signal received mid-cycle. Exiting." >> "$LOG"
+        rm -f "$STOPFILE"
+        exit 0
+      fi
 
-    run_agent_query "$q"
-    sleep "$QUERY_DELAY"
-  done
+      run_agent_query "$q"
+      sleep "$QUERY_DELAY"
+    done
+  fi
 
   echo "[$(date)] Cycle $cycle complete. Sleeping ${CYCLE_DELAY}s..." >> "$LOG"
   sleep "$CYCLE_DELAY"
