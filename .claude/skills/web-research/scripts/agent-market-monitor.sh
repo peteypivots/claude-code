@@ -270,6 +270,7 @@ Output ONLY the queries, one per line. No numbering, no explanation."
   result=$(LOCAL_SYSTEM_PROMPT="You output only search queries, one per line. No commentary." \
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
     bun /app/cli.mjs \
+      --tools "" \
       --mcp-config /tmp/empty-mcp.json \
       --dangerously-skip-permissions \
       --output-format json \
@@ -304,6 +305,7 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
     bun /app/cli.mjs \
       --agent web-researcher \
+      --tools "Bash,Read" \
       --mcp-config /tmp/empty-mcp.json \
       --dangerously-skip-permissions \
       --output-format json \
@@ -369,6 +371,7 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
     bun /app/cli.mjs \
       --agent web-researcher \
+      --tools "Bash,Read" \
       --mcp-config /tmp/empty-mcp.json \
       --dangerously-skip-permissions \
       --output-format json \
@@ -496,6 +499,7 @@ After all workers complete, report:
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
     bun /app/cli.mjs \
       --agent research-batch-orchestrator \
+      --tools "Agent,Bash,Read" \
       --mcp-config /tmp/empty-mcp.json \
       --dangerously-skip-permissions \
       --output-format json \
