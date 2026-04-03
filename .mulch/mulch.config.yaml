@@ -11,6 +11,8 @@ domains:
   - query-engine
   - context
   - os-eco
+  - training-capture
+  - development
 governance:
   max_entries: 100
   warn_entries: 150
