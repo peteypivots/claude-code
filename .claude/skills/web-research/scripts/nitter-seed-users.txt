@@ -1,0 +1,44 @@
+# Nitter Seed Users — initial accounts to bootstrap the social graph crawler
+# Hot-reloadable: edit while crawler is running, changes picked up next cycle
+# Format: one username per line (with or without @), lines starting with # are comments
+#
+# Choose high-signal accounts that mention/interact with many others,
+# so we discover new users from their conversations.
+
+# === Tech / AI ===
+elonmusk
+sama
+kaboreinc
+ylecun
+demaborelai
+AndrewYNg
+
+# === Crypto ===
+VitalikButerin
+caborevance
+aantonop
+CryptoHayes
+
+# === Finance / Markets ===
+zaborohedge
+jimcramer
+unusual_whales
+DeItaone
+
+# === News / Journalism ===
+Reuters
+AP
+BBCBreaking
+WSJ
+naborelake
+
+# === Developer / Open Source ===
+ThePrimeagen
+t3dotgg
+levelsio
+kelseyhightower
+
+# === Sports / Racing ===
+daborelake
+SportsBettingAG
+ESPNDeportes

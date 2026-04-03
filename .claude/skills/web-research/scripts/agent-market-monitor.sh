@@ -188,83 +188,24 @@ RESEARCH_PROMPT="$(cat /app/.claude/prompts/research-system.md)"
 # Create empty MCP config to prevent MCP tools from loading
 echo '{"mcpServers":{}}' > /tmp/empty-mcp.json
 
-# LanceDB endpoint for storing training examples
-LANCEDB_URI="${LANCEDB_URI:-http://lancedb-api:8000}"
+# Training data capture is now handled by TypeScript layer (src/services/llm/trainingCapture.ts)
+# Configured via .env or docker-compose.yml
 
-# Capture tool-use correction as training data when model fails to call tools
-# Args: query, bad_response, prompt
+# Training capture functions removed - now handled by TypeScript layer
+# Stub function for backward compatibility
+capture_multi_turn_example() {
+  # Stub - training capture now handled by TypeScript layer
+  return 0
+}
+
+capture_dpo_pair() {
+  # Stub - training capture now handled by TypeScript layer
+  return 0
+}
+
 capture_training_example() {
-  local query="$1"
-  local bad_response="$2"
-  local prompt="$3"
-
-  local timestamp
-  timestamp=$(date -Iseconds)
-  local id
-  id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "train-$(date +%s)-$$")
-
-  # The CORRECT assistant response showing proper tool use
-  local correct_response="I'll run the research pipeline for this query.
-
-<tool_call>
-{\"name\": \"Bash\", \"parameters\": {\"command\": \"bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \\\"${query}\\\"\"}}
-</tool_call>"
-
-  # Hash for dedup
-  local content_hash
-  content_hash=$(printf '%s%s' "$prompt" "$correct_response" | sha256sum | cut -d' ' -f1)
-
-  # Build JSON payload for training_examples table
-  local payload
-  payload=$(jq -n \
-    --arg id "$id" \
-    --arg session_id "monitor-$$" \
-    --arg system_prompt "You are a web research agent. When given a research query, use the Bash tool to run the research pipeline. Do not describe what you would do - actually call the tool." \
-    --arg user_content "$prompt" \
-    --arg assistant_content "$correct_response" \
-    --arg canonical_prompt "research: $query" \
-    --arg model_used "${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
-    --arg routing_decision "local" \
-    --argjson routing_confidence 1.0 \
-    --argjson latency_ms 0 \
-    --arg feedback "CORRECTION: Model gave text response instead of tool call. Bad: ${bad_response:0:100}" \
-    --argjson quality_score 1.0 \
-    --arg tags "tool_use_correction,fallback,web_research" \
-    --arg content_hash "$content_hash" \
-    --argjson turn_index 1 \
-    --arg timestamp "$timestamp" \
-    '{
-      id: $id,
-      session_id: $session_id,
-      system_prompt: $system_prompt,
-      user_content: $user_content,
-      assistant_content: $assistant_content,
-      canonical_prompt: $canonical_prompt,
-      model_used: $model_used,
-      routing_decision: $routing_decision,
-      routing_confidence: $routing_confidence,
-      latency_ms: $latency_ms,
-      feedback: $feedback,
-      quality_score: $quality_score,
-      tags: $tags,
-      content_hash: $content_hash,
-      turn_index: $turn_index,
-      timestamp: $timestamp
-    }')
-
-  # Store to LanceDB training_examples table
-  local result
-  result=$(curl -s -X POST "${LANCEDB_URI}/dbs/user_dbs/tables/training_examples/ingest" \
-    -H "Content-Type: application/json" \
-    -d "{\"records\":[${payload}]}" 2>/dev/null)
-
-  if echo "$result" | grep -qE '"ingested"|"status":"ok"'; then
-    echo "[$(date)]   📝 Training example stored: $id" >> "$LOG"
-    return 0
-  else
-    echo "[$(date)]   ⚠️  Training store failed: ${result:0:80}" >> "$LOG"
-    return 1
-  fi
+  # Stub - training capture now handled by TypeScript layer
+  return 0
 }
 
 # Number of LLM-generated queries per cycle (rest come from static list)
@@ -414,15 +355,15 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
 
   if [ "$used_tools" = "false" ]; then
     echo "[$(date)]   ⚠️  Model gave text-only response, running pipeline directly..." >> "$LOG"
-    # Capture as training example before running fallback
-    capture_training_example "$query" "$answer" "$prompt"
-    # Fallback: run pipeline directly
+    
+    # Run fallback pipeline
     local fallback_result
     fallback_result=$(bash /app/.claude/skills/web-research/scripts/research-pipeline.sh "$query" 2>/dev/null)
     local stored
     stored=$(echo "$fallback_result" | grep -c "STORED" || echo "0")
     local dupes
     dupes=$(echo "$fallback_result" | grep -c "DUPLICATE" || echo "0")
+    
     echo "[$(date)]   Fallback: stored=$stored, dupes=$dupes" >> "$LOG"
     answer="[FALLBACK] Pipeline ran directly: $stored stored, $dupes duplicates"
     turns="fallback"
@@ -481,15 +422,14 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
   fi
 
   if [ "$used_tools" = "false" ]; then
-    # Capture as training example before running fallback
-    capture_training_example "$query" "$answer" "$prompt"
-    # Fallback: run pipeline directly
+    # Model gave text instead of tool call - run fallback pipeline
     local fallback_result
     fallback_result=$(bash /app/.claude/skills/web-research/scripts/research-pipeline.sh "$query" 2>/dev/null)
     local stored
     stored=$(echo "$fallback_result" | grep -c "STORED" || echo "0")
     local dupes
     dupes=$(echo "$fallback_result" | grep -c "DUPLICATE" || echo "0")
+    
     answer="[FALLBACK] stored=$stored, dupes=$dupes"
     turns="fallback"
   fi

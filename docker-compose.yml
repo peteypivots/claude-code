@@ -80,6 +80,10 @@ services:
       OLLAMA_NATIVE_TOOLS: ${OLLAMA_NATIVE_TOOLS:-false}
       OLLAMA_MODEL_SONNET: ${OLLAMA_MODEL_SONNET:-}
       OLLAMA_MODEL_HAIKU: ${OLLAMA_MODEL_HAIKU:-}
+      
+      # ── Training Data Capture (collects v7 examples for fine-tuning) ──
+      TRAINING_CAPTURE: ${TRAINING_CAPTURE:-true}
+      TRAINING_CAPTURE_VERBOSE: ${TRAINING_CAPTURE_VERBOSE:-false}
     
     # ── Volume Mounts for Yak Integration & Data ───────────
     volumes:
@@ -109,6 +113,10 @@ services:
       - ./.overstory:/app/.overstory  # rw needed for ov logs
       - ./.claude:/app/.claude
       - ./.git:/app/.git:ro        # git repo for mulch diff, sd sync
+      
+      # ── Development: Source files for hot-reload (TypeScript, shell scripts) ──
+      - ./src/services/llm:/app/src/services/llm  # trainingCapture.ts, queryModelRouter.ts
+      - ./scripts:/app/scripts                    # shell scripts auto-sync
     
     # ── Logging Configuration ──────────────────────────────
     logging:

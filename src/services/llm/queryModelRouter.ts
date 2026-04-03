@@ -9,6 +9,7 @@ import { randomUUID, type UUID } from 'crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import { captureToolLoopRecovery, captureSuccessfulToolUse, isCaptureEnabled } from './trainingCapture.js'
 
 const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
 
@@ -208,6 +209,7 @@ interface RoutingDecision {
   model: string
   action?: 'local' | 'reason' | 'escalate'
   suggestedTool?: string
+  confidence?: number
 }
 
 /**
@@ -864,6 +866,14 @@ async function* handleLocalAction(
 ): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
   const { messages, systemPrompt, tools, signal } = params
 
+  // Extract user query for capture (mirrors extraction in queryModelWithRouting)
+  const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
+  const fullUserQuery = lastUserMsg?.type === 'user'
+    ? (typeof lastUserMsg.message?.content === 'string'
+        ? lastUserMsg.message.content
+        : '[complex content]')
+    : ''
+
   // Use local model
   const provider = getOllamaProvider(config)
   
@@ -986,6 +996,7 @@ async function* handleLocalAction(
 
     // If looping, remove that tool and tell the model to answer
     let effectiveTools = llmTools
+    let toolResultPreview = '' // Hoisted for capture block access
     if (loopedToolName && llmTools) {
       effectiveTools = llmTools.filter((t: any) => {
         const name = t.name || t.function?.name
@@ -994,7 +1005,6 @@ async function* handleLocalAction(
       routerLog(`Removed looped tool "${loopedToolName}" from tool list (${llmTools.length} → ${effectiveTools.length})`, 'warn')
       
       // Extract the most recent tool result for this tool to help the model answer
-      let toolResultPreview = ''
       for (let i = messages.length - 1; i >= 0; i--) {
         const m = messages[i]
         if (m.type !== 'user') continue
@@ -1116,6 +1126,51 @@ async function* handleLocalAction(
       latencyMs: Date.now() - localStartTime,
     })
     recordLocalCall(usage.inputTokens + usage.outputTokens)
+
+    // ── Training Capture ───────────────────────────────────────────────────
+    // Capture successful tool use or tool loop recovery for training data
+    if (isCaptureEnabled()) {
+      const finalText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('')
+
+      if (loopedToolName && finalText.length > 50) {
+        // Tool loop recovery: model was stuck, now answered - capture as DPO + positive
+        captureToolLoopRecovery({
+          userQuery: fullUserQuery,
+          systemPrompt: systemPromptText.substring(0, 3000),
+          loopedToolName,
+          toolCallCount: consecutiveCount,
+          toolResult: toolResultPreview,
+          finalAnswer: finalText,
+          context: {
+            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+            model: decision.model,
+            routingDecision: decision.action,
+            routingConfidence: decision.confidence ?? 0.7,
+            latencyMs: Date.now() - localStartTime,
+          },
+        }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
+      } else if (toolUses.length > 0 && finalText.length > 50) {
+        // Successful tool use: capture as positive example
+        const toolCallsForCapture = toolUses.map(t => ({
+          name: (t as any).name,
+          arguments: JSON.stringify((t as any).input),
+          result: '', // We don't have the result here; would need tracking
+        }))
+        captureSuccessfulToolUse({
+          userQuery: fullUserQuery,
+          systemPrompt: systemPromptText.substring(0, 3000),
+          toolCalls: toolCallsForCapture,
+          finalAnswer: finalText,
+          context: {
+            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+            model: decision.model,
+            routingDecision: decision.action,
+            routingConfidence: decision.confidence ?? 0.7,
+            latencyMs: Date.now() - localStartTime,
+          },
+        }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
+      }
+    }
 
   } catch (error) {
     if (config.verbose) {

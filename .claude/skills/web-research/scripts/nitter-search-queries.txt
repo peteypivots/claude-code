@@ -1,0 +1,57 @@
+# Nitter Search Queries — static queries for RSS search crawling
+# Hot-reloadable: edit while crawler is running, changes picked up next cycle
+# Format: one query per line, lines starting with # are comments
+#
+# Nitter search supports: keywords, "exact phrase", from:user, since:YYYY-MM-DD, until:YYYY-MM-DD
+
+# === Trending / Viral ===
+viral tweet today
+trending topic discussion
+breaking news developing
+
+# === Tech / AI ===
+AI artificial intelligence announcement
+LLM large language model
+GPT Claude Gemini
+open source AI model
+AI safety alignment
+tech layoffs hiring
+startup funding series
+
+# === Crypto / DeFi ===
+bitcoin BTC price
+ethereum ETH update
+crypto regulation SEC
+DeFi decentralized finance
+NFT web3 announcement
+
+# === Finance / Markets ===
+stock market rally crash
+Federal Reserve rate decision
+earnings report beat miss
+IPO SPAC listing
+bond yields treasury
+VIX volatility spike
+options unusual activity
+
+# === Geopolitical ===
+sanctions trade war tariff
+election policy announcement
+climate energy transition
+
+# === Sports / Betting ===
+betting odds sharp money
+horse racing entries tips
+NFL NBA odds spreads
+UFC fight predictions
+
+# === Developer / Tech Culture ===
+new framework library release
+security vulnerability CVE
+open source contribution
+programming language update
+
+# === Meta / Platform ===
+Twitter X platform changes
+social media policy moderation
+algorithm recommendation feed
