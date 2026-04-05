@@ -28,5 +28,3 @@ Thumbs.db
 .vscode
 .idea
 
-# Docker context itself
-docker

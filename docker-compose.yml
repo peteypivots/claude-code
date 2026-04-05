@@ -10,14 +10,14 @@ services:
       logging: promtail
       logging_job: claude-code
     
-    # ── Environment & API Key ──────────────────────────────
+    # Environment & API Key ──────────────────────────────
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ANTHROPIC_AUTH_TOKEN: "skip"
       LOG_LEVEL: ${LOG_LEVEL:-info}
       YAK_NODE_NAME: ${YAK_NODE_NAME:-claude-code-1}
       YAK_MASTER_HOST: ${YAK_MASTER_HOST:-localhost}
-      
+            
       # ── Sandbox Mode (allow --dangerously-skip-permissions as root) ──
       IS_SANDBOX: "1"
       
@@ -28,6 +28,9 @@ services:
       
       # ── SearXNG Web Search (for local models) ──────────
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      
+      # ── Meta AI MCP (web research via Meta AI) ─────────
+      META_AI_MCP_URL: ${META_AI_MCP_URL:-http://meta-ai-mcp:8099}
       
       # ── LanceDB Vector Store (research memory + dedup) ──
       LANCEDB_URI: ${LANCEDB_URI:-http://lancedb-api:8000}
@@ -134,6 +137,10 @@ services:
           cpus: '1'
           memory: 2G
     
+    # ── Host Access (for meta-ai-mcp and other host services) ──
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     # ── Networking ─────────────────────────────────────────
     networks:
       - claude-network
@@ -148,11 +155,15 @@ services:
     
     # ── Restart Policy ────────────────────────────────────
     restart: unless-stopped
+    # Starts the market monitor agent in the background
+    # To control it, use:
+    #   docker exec claude-code-instance touch /tmp/agent-monitor-default-stop  (stop)
+    #   docker exec claude-code-instance tail -f /tmp/agent-monitor-default.log (logs)
     
-    # ── Entrypoint with Yak Support ───────────────────────
+    # ── Entrypoint with Yak Support ──
     entrypoint: /usr/local/bin/yak-init.sh
-    command: ["tail", "-f", "/dev/null"]
-    
+    command: ["sleep", "infinity"]
+
     # Keep container running
     stdin_open: true
     tty: true
