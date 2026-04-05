@@ -5,6 +5,8 @@ when-to-use: Start social media monitoring, user discovery, or tweet collection
 background: true
 tools:
   - Bash
+  - mcp__claude-code-explorer__*
+  - mcp__nitter__*
 model: inherit
 memory: user
 maxTurns: 15

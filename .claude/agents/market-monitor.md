@@ -5,6 +5,9 @@ when-to-use: Start market monitoring, research queries, or batch web research
 background: true
 tools:
   - Bash
+  - WebSearch
+  - mcp__meta-ai-mcp__*
+  - mcp__nitter__*
 model: inherit
 memory: user
 maxTurns: 10

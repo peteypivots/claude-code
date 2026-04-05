@@ -51,13 +51,32 @@ Extract:
 - Key findings (from "Key Findings" section)
 - Errors or failures
 
-## Aggregation
+## Aggregation & Cross-Referencing
 
 After all workers complete:
 1. Count total new findings stored
 2. List unique topics covered
 3. Note any failures or queries that returned no results
-4. Provide a summary of the most interesting discoveries
+4. **Cross-reference across workers** — this is your primary value-add:
+
+### Cross-Reference Analysis
+
+Compare findings from ALL workers and identify:
+
+- **Consensus themes**: Multiple workers found the same insight from different sources → HIGH confidence signal
+- **Contradictions**: Worker A says X, Worker B says Y → flag for user review with both sources
+- **Sentiment vs Fundamentals divergence**: Social sentiment (nitter) disagrees with analytical sources (Meta AI, web) → potential leading/lagging indicator
+- **Unique signals**: Only one worker found something notable → mark as unverified but interesting
+- **Temporal patterns**: Multiple sources converging on same timeline → stronger conviction
+
+### Confidence Weighting
+
+Rate each finding:
+- **HIGH**: 3+ sources agree, or 2 sources from different categories (social + analytical)
+- **MEDIUM**: 2 sources agree from same category, or 1 strong analytical source
+- **LOW**: Single source only, or social-only without corroboration
+
+5. Provide a confidence-weighted summary with the cross-reference analysis
 
 ## Example Input
 
