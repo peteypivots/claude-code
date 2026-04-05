@@ -1,0 +1,16 @@
+#!/bin/bash
+# Convenience wrapper for running claude-code CLI inside docker container
+# Usage: ./claude-code --agent market-monitor
+#        ./claude-code -p "your prompt"
+
+CONTAINER="${CONTAINER_NAME:-claude-code-instance}"
+
+# Check if container is running
+if ! docker ps | grep -q "$CONTAINER"; then
+    echo "Error: Docker container '$CONTAINER' is not running"
+    echo "Start it with: docker-compose up -d"
+    exit 1
+fi
+
+# Forward all arguments to the CLI inside the container
+docker exec "$CONTAINER" bun /app/cli.mjs "$@"

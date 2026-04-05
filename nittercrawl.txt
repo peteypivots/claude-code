@@ -1,0 +1,22 @@
+[main.tsx] Session mode: hasPrintFlag=false, hasInitOnlyFlag=false, hasSdkUrl=false, stdout.isTTY=undefined, isNonInteractive=true
+Running agent script: node /app/mcp-server/src/run-crawler.mjs --cycles 8 --delay 60
+Nitter Crawler Starting
+  Cycles: 8
+  Delay: 60s between cycles
+
+=== Cycle 1 @ 2026-04-03T11:28:20.429Z ===
+Updating priorities...
+{
+  "total_users": 300,
+  "tier_cutoffs": {
+    "tier1": 0.8,
+    "tier2": 0
+  },
+  "tier_counts": {
+    "1": 53,
+    "2": 247,
+    "3": 0
+  }
+}
+
+Running crawl cycle...
