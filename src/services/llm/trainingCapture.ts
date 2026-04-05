@@ -29,6 +29,17 @@ const TABLE = 'training_examples'
 const CAPTURE_ENABLED = process.env.TRAINING_CAPTURE === 'true'
 const VERBOSE = process.env.TRAINING_CAPTURE_VERBOSE === 'true'
 
+// Fields that exist in the LanceDB training_examples table schema.
+// Records are filtered to only include these fields before ingest to avoid
+// "field does not exist" errors when the code adds new fields.
+const TABLE_SCHEMA_FIELDS = new Set([
+  'id', 'session_id', 'system_prompt', 'user_content', 'assistant_content',
+  'canonical_prompt', 'model_used', 'routing_decision', 'routing_confidence',
+  'routing_reason', 'suggested_tool', 'input_tokens', 'output_tokens',
+  'latency_ms', 'feedback', 'quality_score', 'tags', 'content_hash',
+  'turn_index', 'timestamp', 'embedding',
+])
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ToolCall {
@@ -55,6 +66,10 @@ export interface CaptureContext {
   model?: string
   routingDecision?: 'local' | 'reason' | 'escalate' | string
   routingConfidence?: number
+  routingReason?: string
+  suggestedTool?: string
+  inputTokens?: number
+  outputTokens?: number
   latencyMs?: number
 }
 
@@ -233,24 +248,45 @@ async function ingest(record: Record<string, unknown>): Promise<boolean> {
     return false
   }
 
+  // Filter record to only include fields in the table schema
+  const filtered: Record<string, unknown> = {}
+  for (const key of Object.keys(record)) {
+    if (TABLE_SCHEMA_FIELDS.has(key)) {
+      filtered[key] = record[key]
+    }
+  }
+
   try {
     const res = await fetch(`${LANCEDB_URI}/dbs/${DB}/tables/${TABLE}/ingest`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ records: [record] }),
+      body: JSON.stringify({ records: [filtered] }),
       signal: AbortSignal.timeout(10000),
     })
 
     if (res.ok) {
-      log(`Stored: ${record.id} (${record.tags})`)
+      log(`Stored: ${filtered.id} (${filtered.tags})`)
+      // Also log to router debug file for visibility
+      try {
+        const { appendFileSync } = require('fs')
+        appendFileSync('/tmp/router-debug.log', `[${new Date().toISOString()}] [CAPTURE] Stored: ${filtered.id} (${filtered.tags})\n`)
+      } catch {}
       return true
     } else {
       const body = await res.text()
-      log(`Ingest failed: ${res.status} - ${body.substring(0, 100)}`, 'error')
+      log(`Ingest failed: ${res.status} - ${body.substring(0, 200)}`, 'error')
+      try {
+        const { appendFileSync } = require('fs')
+        appendFileSync('/tmp/router-debug.log', `[${new Date().toISOString()}] [CAPTURE] Ingest failed: ${res.status} - ${body.substring(0, 200)}\n`)
+      } catch {}
       return false
     }
   } catch (e) {
     log(`Ingest error: ${e}`, 'error')
+    try {
+      const { appendFileSync } = require('fs')
+      appendFileSync('/tmp/router-debug.log', `[${new Date().toISOString()}] [CAPTURE] Ingest error: ${e}\n`)
+    } catch {}
     return false
   }
 }
@@ -293,6 +329,10 @@ export async function captureMultiTurn(capture: MultiTurnCapture): Promise<strin
     model_used: capture.context?.model || 'unknown',
     routing_decision: capture.context?.routingDecision || 'local',
     routing_confidence: capture.context?.routingConfidence ?? 0.7,
+    routing_reason: capture.context?.routingReason || null,
+    suggested_tool: capture.context?.suggestedTool || null,
+    input_tokens: capture.context?.inputTokens ?? 0,
+    output_tokens: capture.context?.outputTokens ?? 0,
     latency_ms: capture.context?.latencyMs ?? 0,
     feedback: null,
     quality_score: qualityScore,
@@ -344,6 +384,10 @@ export async function captureDPO(capture: DPOCapture): Promise<string | null> {
     model_used: capture.context?.model || 'unknown',
     routing_decision: capture.context?.routingDecision || 'local',
     routing_confidence: capture.context?.routingConfidence ?? 0.5,
+    routing_reason: capture.context?.routingReason || null,
+    suggested_tool: capture.context?.suggestedTool || null,
+    input_tokens: capture.context?.inputTokens ?? 0,
+    output_tokens: capture.context?.outputTokens ?? 0,
     latency_ms: capture.context?.latencyMs ?? 0,
     feedback: 'down', // DPO rejected = implicit negative feedback
     quality_score: 0.3, // Low score for correction examples
@@ -480,6 +524,172 @@ export async function captureSuccessfulToolUse(params: {
   })
 }
 
+// ── External API Capture (Grok, etc) ──────────────────────────────────────────
+
+export interface ExternalAPICapture {
+  /** API provider (grok, perplexity, etc) */
+  provider: string
+  /** API endpoint/method called */
+  endpoint: string
+  /** Original request/query */
+  request: string
+  /** API response */
+  response: string
+  /** Latency in milliseconds */
+  latencyMs: number
+  /** Whether call was rate limited */
+  rateLimited?: boolean
+  /** Rate limit state at time of call */
+  rateLimitState?: {
+    totalCalls: number
+    rateLimitHits: number
+    estimatedResetSecs?: number
+  }
+  /** Tags for filtering */
+  tags?: string[]
+}
+
+export interface QueryRephraseCapture {
+  /** Original query that hit duplicates */
+  originalQuery: string
+  /** Alternative suggested by Grok */
+  alternativeQuery: string
+  /** Context: why rephrase was needed */
+  reason: 'duplicate_results' | 'no_results' | 'low_quality' | string
+  /** Number of duplicates that triggered rephrase */
+  duplicateCount?: number
+  /** Whether the alternative worked better */
+  alternativeSuccess?: boolean
+}
+
+/**
+ * Capture an external API interaction (Grok, etc).
+ * Useful for tracking API usage, rate limits, and training query routing.
+ */
+export async function captureExternalAPICall(capture: ExternalAPICapture): Promise<string | null> {
+  if (!CAPTURE_ENABLED) return null
+
+  const id = randomUUID()
+  const timestamp = new Date().toISOString()
+  const tags = ['external_api', capture.provider, ...(capture.tags || [])]
+  const hash = contentHash(capture.request + capture.response)
+
+  // Generate embedding
+  const embeddingText = `${capture.request}\n${capture.response}`.substring(0, 2000)
+  const embedding = await getEmbedding(embeddingText)
+
+  // Build record
+  const record: Record<string, unknown> = {
+    id,
+    session_id: `external-api-${Date.now()}`,
+    system_prompt: `External API: ${capture.provider} - ${capture.endpoint}`,
+    user_content: capture.request.substring(0, 10000),
+    assistant_content: capture.response.substring(0, 10000),
+    canonical_prompt: JSON.stringify({
+      type: 'external_api',
+      provider: capture.provider,
+      endpoint: capture.endpoint,
+      request: capture.request,
+      response: capture.response,
+      rateLimited: capture.rateLimited,
+      rateLimitState: capture.rateLimitState,
+    }),
+    model_used: capture.provider,
+    routing_decision: 'external',
+    routing_confidence: capture.rateLimited ? 0.0 : 1.0,
+    latency_ms: capture.latencyMs,
+    feedback: capture.rateLimited ? 'down' : null,
+    quality_score: capture.rateLimited ? 0.0 : 0.8,
+    tags: tags.join(','),
+    content_hash: hash,
+    turn_index: 0,
+    timestamp,
+  }
+
+  if (embedding) {
+    record.embedding = embedding
+  }
+
+  const success = await ingest(record)
+  captureStats.externalAPI++
+  return success ? id : null
+}
+
+/**
+ * Capture a query rephrase example (Grok suggested alternative).
+ * Useful for training query expansion/refinement models.
+ */
+export async function captureQueryRephrase(capture: QueryRephraseCapture): Promise<string | null> {
+  if (!CAPTURE_ENABLED) return null
+
+  const id = randomUUID()
+  const timestamp = new Date().toISOString()
+  const tags = ['query_rephrase', `reason_${capture.reason}`]
+  if (capture.alternativeSuccess) tags.push('rephrase_success')
+  const hash = contentHash(capture.originalQuery + capture.alternativeQuery)
+
+  // Generate embedding
+  const embeddingText = `Original: ${capture.originalQuery}\nAlternative: ${capture.alternativeQuery}`
+  const embedding = await getEmbedding(embeddingText)
+
+  // Build record
+  const record: Record<string, unknown> = {
+    id,
+    session_id: `rephrase-${Date.now()}`,
+    system_prompt: 'Query rephrase training example',
+    user_content: capture.originalQuery.substring(0, 10000),
+    assistant_content: capture.alternativeQuery.substring(0, 10000),
+    canonical_prompt: JSON.stringify({
+      type: 'query_rephrase',
+      original: capture.originalQuery,
+      alternative: capture.alternativeQuery,
+      reason: capture.reason,
+      duplicateCount: capture.duplicateCount,
+      alternativeSuccess: capture.alternativeSuccess,
+    }),
+    model_used: 'grok',
+    routing_decision: 'external',
+    routing_confidence: 0.9,
+    latency_ms: 0,
+    feedback: capture.alternativeSuccess ? 'up' : null,
+    quality_score: capture.alternativeSuccess ? 0.9 : 0.5,
+    tags: tags.join(','),
+    content_hash: hash,
+    turn_index: 0,
+    timestamp,
+  }
+
+  if (embedding) {
+    record.embedding = embedding
+  }
+
+  const success = await ingest(record)
+  captureStats.rephrase++
+  return success ? id : null
+}
+
+/**
+ * Batch capture multiple query rephrase examples.
+ * Used when Grok returns alternatives for multiple queries at once.
+ */
+export async function captureBatchRephrase(
+  alternatives: Record<string, string>,
+  reason: string = 'duplicate_results'
+): Promise<string[]> {
+  const ids: string[] = []
+  
+  for (const [original, alternative] of Object.entries(alternatives)) {
+    const id = await captureQueryRephrase({
+      originalQuery: original,
+      alternativeQuery: alternative,
+      reason,
+    })
+    if (id) ids.push(id)
+  }
+  
+  return ids
+}
+
 // ── Stats & Debugging ─────────────────────────────────────────────────────────
 
 let captureStats = {
@@ -487,6 +697,8 @@ let captureStats = {
   dpo: 0,
   toolLoop: 0,
   fallback: 0,
+  externalAPI: 0,
+  rephrase: 0,
   errors: 0,
 }
 
@@ -495,7 +707,7 @@ export function getCaptureStats() {
 }
 
 export function resetCaptureStats() {
-  captureStats = { multiTurn: 0, dpo: 0, toolLoop: 0, fallback: 0, errors: 0 }
+  captureStats = { multiTurn: 0, dpo: 0, toolLoop: 0, fallback: 0, externalAPI: 0, rephrase: 0, errors: 0 }
 }
 
 export function isCaptureEnabled(): boolean {

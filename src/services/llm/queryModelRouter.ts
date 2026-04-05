@@ -9,7 +9,8 @@ import { randomUUID, type UUID } from 'crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { isEnvTruthy } from '../../utils/envUtils.js'
-import { captureToolLoopRecovery, captureSuccessfulToolUse, isCaptureEnabled } from './trainingCapture.js'
+import { captureToolLoopRecovery, captureSuccessfulToolUse, captureMultiTurn, isCaptureEnabled } from './trainingCapture.js'
+import { captureResearchFindings, isResearchCaptureEnabled } from './researchCapture.js'
 
 const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
 
@@ -59,10 +60,30 @@ function getLocalSystemPrompt(): string {
  * CLAUDE.md, memory instructions, and git status — thousands of tokens that
  * overwhelm the local model. Our canopy system prompt already covers essentials,
  * but memory content is unique per-project and must be preserved.
+ * 
+ * IMPORTANT: When LOCAL_SYSTEM_PROMPT is set (agent/research mode), we strip
+ * ALL system-reminder content including claudeMd. The agent has its own focused
+ * system prompt and injecting CLAUDE.md causes the local model to regurgitate
+ * internal instructions/tool names into external API calls (info leak to Meta AI).
  */
 function stripSystemReminders(text: string): string {
+  // In agent mode (LOCAL_SYSTEM_PROMPT set), strip everything — the agent
+  // has its own system prompt and doesn't need CLAUDE.md context leaking
+  // into tool call arguments sent to external APIs like Meta AI.
+  const agentMode = !!(process.env.LOCAL_SYSTEM_PROMPT && process.env.LOCAL_SYSTEM_PROMPT.length > 50)
+
   return text.replace(/<system-reminder>([\s\S]*?)<\/system-reminder>/g, (_match, inner: string) => {
-    // Extract memory/claudeMd sections from the context block
+    if (agentMode) {
+      // Agent mode: only preserve currentDate, strip claudeMd and memory
+      // to prevent leaking internal instructions into external API queries
+      const dateMatch = inner.match(/^# currentDate\n([\s\S]*?)(?=^# |\s*$)/m)
+      if (dateMatch?.[1]?.trim()) {
+        return `[currentDate]\n${dateMatch[1].trim()}`
+      }
+      return ''
+    }
+
+    // Normal mode: preserve claudeMd, memory, and currentDate
     const preserved: string[] = []
     
     // Match "# claudeMd\n..." or "# memory\n..." sections within the context
@@ -847,6 +868,29 @@ async function* handleReasoningAction(
     })
     recordLocalCall(reasoningResult.usage.inputTokens + reasoningResult.usage.outputTokens)
 
+    // Capture reasoning path for training
+    if (isCaptureEnabled()) {
+      captureMultiTurn({
+        userQuery: userContent,
+        systemPrompt: '',
+        toolCalls: [],
+        toolResults: [],
+        finalAnswer: reasoningText,
+        tags: ['reasoning', 'deepseek-r1'],
+        context: {
+          sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+          model: 'deepseek-r1:7b',
+          routingDecision: 'reason',
+          routingConfidence: decision.confidence ?? 0.7,
+          routingReason: decision.reason,
+          suggestedTool: decision.suggestedTool,
+          inputTokens: reasoningResult.usage.inputTokens,
+          outputTokens: reasoningResult.usage.outputTokens,
+          latencyMs: reasoningResult.durationMs,
+        },
+      }).catch(e => routerLog(`Training capture error (reasoning): ${e}`, 'error'))
+    }
+
   } catch (error) {
     if (config.verbose) {
       console.error('[Router] Reasoning failed, falling back to local:', error)
@@ -1129,8 +1173,70 @@ async function* handleLocalAction(
 
     // ── Training Capture ───────────────────────────────────────────────────
     // Capture successful tool use or tool loop recovery for training data
+    routerLog(`[CAPTURE] isCaptureEnabled=${isCaptureEnabled()}, toolUses=${toolUses.length}, messagesLen=${messages.length}`)
     if (isCaptureEnabled()) {
       const finalText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('')
+
+      // Extract tool calls + results from full conversation history
+      // (toolUses only has current turn's calls, which is empty on the answer turn)
+      const historyToolCalls: Array<{ name: string; arguments: string; result: string }> = []
+      const toolResultMap = new Map<string, string>()
+
+      // First pass: collect all tool_result blocks keyed by tool_use_id
+      for (const m of messages) {
+        if (m.type === 'user' && Array.isArray(m.message.content)) {
+          for (const c of m.message.content) {
+            if (c.type === 'tool_result') {
+              const id = (c as any).tool_use_id
+              const content = typeof c.content === 'string'
+                ? c.content
+                : JSON.stringify(c.content)
+              toolResultMap.set(id, content)
+            }
+          }
+        }
+      }
+
+      // Second pass: collect all tool_use blocks from assistant turns, match with results
+      for (const m of messages) {
+        if (m.type === 'assistant') {
+          for (const c of m.message.content) {
+            if (c.type === 'tool_use') {
+              const tu = c as any
+              historyToolCalls.push({
+                name: tu.name,
+                arguments: JSON.stringify(tu.input),
+                result: toolResultMap.get(tu.id) || '',
+              })
+            }
+          }
+        }
+      }
+
+      routerLog(`[CAPTURE] historyToolCalls=${historyToolCalls.length}, finalTextLen=${finalText.length}, loopedTool=${loopedToolName || 'none'}`)
+      if (historyToolCalls.length > 0) {
+        routerLog(`[CAPTURE] Tool names: ${historyToolCalls.map(t => t.name).join(', ')}`)
+        routerLog(`[CAPTURE] Results present: ${historyToolCalls.map(t => t.result.length > 0).join(', ')}`)
+      }
+
+      // Research capture: scan MCP tool results for structured research responses
+      if (isResearchCaptureEnabled() && toolResultMap.size > 0) {
+        routerLog(`[RESEARCH_CAPTURE] toolResultMap.size=${toolResultMap.size}`)
+        for (const [id, content] of toolResultMap) {
+          const toolName = historyToolCalls.find(t => t.result === content)?.name || 'unknown'
+          routerLog(`[RESEARCH_CAPTURE] tool=${toolName}, id=${id}, contentLen=${content.length}, preview=${content.substring(0, 200).replace(/\n/g, '\\n')}`)
+        }
+        captureResearchFindings(
+          toolResultMap,
+          historyToolCalls,
+          fullUserQuery,
+          {
+            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+            model: decision.model,
+            routingDecision: decision.action,
+          },
+        ).catch(e => routerLog(`Research capture error: ${e}`, 'error'))
+      }
 
       if (loopedToolName && finalText.length > 50) {
         // Tool loop recovery: model was stuck, now answered - capture as DPO + positive
@@ -1146,26 +1252,29 @@ async function* handleLocalAction(
             model: decision.model,
             routingDecision: decision.action,
             routingConfidence: decision.confidence ?? 0.7,
+            routingReason: decision.reason,
+            suggestedTool: decision.suggestedTool,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
             latencyMs: Date.now() - localStartTime,
           },
         }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
-      } else if (toolUses.length > 0 && finalText.length > 50) {
+      } else if (historyToolCalls.length > 0 && finalText.length > 50) {
         // Successful tool use: capture as positive example
-        const toolCallsForCapture = toolUses.map(t => ({
-          name: (t as any).name,
-          arguments: JSON.stringify((t as any).input),
-          result: '', // We don't have the result here; would need tracking
-        }))
         captureSuccessfulToolUse({
           userQuery: fullUserQuery,
           systemPrompt: systemPromptText.substring(0, 3000),
-          toolCalls: toolCallsForCapture,
+          toolCalls: historyToolCalls,
           finalAnswer: finalText,
           context: {
             sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
             model: decision.model,
             routingDecision: decision.action,
             routingConfidence: decision.confidence ?? 0.7,
+            routingReason: decision.reason,
+            suggestedTool: decision.suggestedTool,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
             latencyMs: Date.now() - localStartTime,
           },
         }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
