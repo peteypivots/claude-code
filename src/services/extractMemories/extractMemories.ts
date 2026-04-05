@@ -15,6 +15,7 @@
 
 import { feature } from 'bun:bundle'
 import { basename } from 'path'
+import { appendFileSync } from 'fs'
 import { getIsRemoteMode } from '../../bootstrap/state.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { ENTRYPOINT_NAME } from '../../memdir/memdir.js'
@@ -60,6 +61,15 @@ import {
   buildExtractAutoOnlyPrompt,
   buildExtractCombinedPrompt,
 } from './prompts.js'
+
+// Debug logging for extraction
+const ROUTER_DEBUG_LOG = '/data/logs/router-debug.log'
+function extractionLog(msg: string) {
+  const ts = new Date().toISOString()
+  try {
+    appendFileSync(ROUTER_DEBUG_LOG, `${ts} [ExtractMemories] ${msg}\n`)
+  } catch { /* ignore */ }
+}
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const teamMemPaths = feature('TEAMMEM')
@@ -294,6 +304,8 @@ let drainer: (timeoutMs?: number) => Promise<void> = async () => {}
  * initConfidenceRating/initPromptCoaching, or per-test in beforeEach.
  */
 export function initExtractMemories(): void {
+  extractionLog('INIT: initExtractMemories called')
+  
   // --- Closure-scoped mutable state ---
 
   /** Every promise handed out by the extractor that hasn't settled yet.
@@ -335,17 +347,21 @@ export function initExtractMemories(): void {
     appendSystemMessage?: AppendSystemMessageFn
     isTrailingRun?: boolean
   }): Promise<void> {
+    extractionLog('RUN: runExtraction started')
     const { messages } = context
     const memoryDir = getAutoMemPath()
+    extractionLog(`RUN: memoryDir=${memoryDir}, messages=${messages.length}`)
     const newMessageCount = countModelVisibleMessagesSince(
       messages,
       lastMemoryMessageUuid,
     )
+    extractionLog(`RUN: newMessageCount=${newMessageCount}`)
 
     // Mutual exclusion: when the main agent wrote memories, skip the
     // forked agent and advance the cursor past this range so the next
     // extraction only considers messages after the main agent's write.
     if (hasMemoryWritesSince(messages, lastMemoryMessageUuid)) {
+      extractionLog('RUN: skipped - conversation wrote to memory files')
       logForDebugging(
         '[extractMemories] skipping — conversation already wrote to memory files',
       )
@@ -371,19 +387,32 @@ export function initExtractMemories(): void {
     const canUseTool = createAutoMemCanUseTool(memoryDir)
     const cacheSafeParams = createCacheSafeParams(context)
 
+    // Skip memory extraction for local models — they hallucinate file paths
+    // and waste turns trying to read non-existent files.
+    // Research data is auto-stored to LanceDB anyway.
+    const isOllamaMode = !!process.env.OLLAMA_BASE_URL
+    if (isOllamaMode) {
+      extractionLog('RUN: skipped - local model (OLLAMA_BASE_URL set)')
+      logForDebugging('[extractMemories] skipping — local model hallucinates paths')
+      return
+    }
+
     // Only run extraction every N eligible turns (tengu_bramble_lintel, default 1).
     // Trailing extractions (from stashed contexts) skip this check since they
     // process already-committed work that should not be throttled.
+    // In local-first mode, always run extraction (throttleN=1).
     if (!isTrailingRun) {
       turnsSinceLastExtraction++
-      if (
-        turnsSinceLastExtraction <
-        (getFeatureValue_CACHED_MAY_BE_STALE('tengu_bramble_lintel', null) ?? 1)
-      ) {
+      const isLocalFirst = process.env.LOCAL_FIRST === 'true'
+      const throttleN = isLocalFirst ? 1 : (getFeatureValue_CACHED_MAY_BE_STALE('tengu_bramble_lintel', null) ?? 1)
+      extractionLog(`RUN: turns=${turnsSinceLastExtraction}, throttleN=${throttleN}, isLocalFirst=${isLocalFirst}`)
+      if (turnsSinceLastExtraction < throttleN) {
+        extractionLog('RUN: skipped - throttled')
         return
       }
     }
     turnsSinceLastExtraction = 0
+    extractionLog('RUN: proceeding to extraction')
 
     inProgress = true
     const startTime = Date.now()
@@ -412,6 +441,7 @@ export function initExtractMemories(): void {
               skipIndex,
             )
 
+      extractionLog(`RUN: prompt length=${userPrompt.length}, starting forked agent`)
       const result = await runForkedAgent({
         promptMessages: [createUserMessage({ content: userPrompt })],
         cacheSafeParams,
@@ -425,6 +455,7 @@ export function initExtractMemories(): void {
         // A hard cap prevents verification rabbit-holes from burning turns.
         maxTurns: 5,
       })
+      extractionLog(`RUN: forked agent completed, messages=${result.messages.length}`)
 
       // Advance the cursor only after a successful run. If the agent errors
       // out (caught below), the cursor stays put so those messages are
@@ -451,12 +482,15 @@ export function initExtractMemories(): void {
       logForDebugging(
         `[extractMemories] finished — ${writtenPaths.length} files written, cache: read=${result.totalUsage.cache_read_input_tokens} create=${result.totalUsage.cache_creation_input_tokens} input=${result.totalUsage.input_tokens} (${hitPct}% hit)`,
       )
+      extractionLog(`RUN: finished — ${writtenPaths.length} files written`)
 
       if (writtenPaths.length > 0) {
+        extractionLog(`RUN: memories saved: ${writtenPaths.join(', ')}`)
         logForDebugging(
           `[extractMemories] memories saved: ${writtenPaths.join(', ')}`,
         )
       } else {
+        extractionLog('RUN: no memories saved this run')
         logForDebugging('[extractMemories] no memories saved this run')
       }
 
@@ -528,12 +562,19 @@ export function initExtractMemories(): void {
     context: REPLHookContext,
     appendSystemMessage?: AppendSystemMessageFn,
   ): Promise<void> {
+    extractionLog(`EXECUTE: called, agentId=${context.toolUseContext.agentId ?? 'main'}`)
+    
     // Only run for the main agent, not subagents
     if (context.toolUseContext.agentId) {
+      extractionLog('EXECUTE: skipped - subagent')
       return
     }
 
-    if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
+    // Local-first mode: bypass GrowthBook flag check since it's not available
+    const isLocalFirst = process.env.LOCAL_FIRST === 'true'
+    extractionLog(`EXECUTE: LOCAL_FIRST=${isLocalFirst}`)
+    if (!isLocalFirst && !getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
+      extractionLog('EXECUTE: skipped - GrowthBook gate')
       if (process.env.USER_TYPE === 'ant' && !hasLoggedGateFailure) {
         hasLoggedGateFailure = true
         logEvent('tengu_extract_memories_gate_disabled', {})
@@ -543,11 +584,14 @@ export function initExtractMemories(): void {
 
     // Check auto-memory is enabled
     if (!isAutoMemoryEnabled()) {
+      extractionLog('EXECUTE: skipped - auto-memory disabled')
       return
     }
+    extractionLog('EXECUTE: auto-memory enabled, proceeding')
 
     // Skip in remote mode
     if (getIsRemoteMode()) {
+      extractionLog('EXECUTE: skipped - remote mode')
       return
     }
 
@@ -555,6 +599,7 @@ export function initExtractMemories(): void {
     // trailing run (overwrites any previously stashed context — only the
     // latest matters since it has the most messages).
     if (inProgress) {
+      extractionLog('EXECUTE: stashing for trailing run')
       logForDebugging(
         '[extractMemories] extraction in progress — stashing for trailing run',
       )
@@ -563,6 +608,7 @@ export function initExtractMemories(): void {
       return
     }
 
+    extractionLog('EXECUTE: calling runExtraction')
     await runExtraction({ context, appendSystemMessage })
   }
 
