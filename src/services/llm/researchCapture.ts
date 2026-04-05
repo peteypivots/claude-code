@@ -322,6 +322,21 @@ function extractNitterData(toolResult: string): { tweets: NitterTweet[], users: 
     for (const item of containers) {
       if (!item || typeof item !== 'object') continue
       const obj = item as Record<string, unknown>
+
+      // Normalize RSS-style fields from nitter MCP (title/description/creator/link/pubDate)
+      // to our expected schema (tweet_id/username/text/permalink/pub_date)
+      if ((!obj.username || !obj.text) && (obj.title || obj.description) && (obj.creator || obj.link)) {
+        const link = (obj.link as string) || ''
+        if (!obj.tweet_id) {
+          const idMatch = link.match(/\/status\/(\d+)/)
+          obj.tweet_id = (obj.guid as string) || (idMatch ? idMatch[1] : contentHash(link || `${obj.title}`))
+        }
+        if (!obj.text) obj.text = (obj.description as string) || (obj.title as string) || ''
+        if (!obj.username) obj.username = ((obj.creator as string) || '').replace(/^@/, '').toLowerCase()
+        if (!obj.permalink) obj.permalink = link
+        if (!obj.pub_date) obj.pub_date = (obj.pubDate as string) || (obj.timestamp as string) || ''
+      }
+
       if (isNitterTweet(obj)) tweets.push(obj)
       else if (isNitterRelationship(obj)) relationships.push(obj)
       else if (isNitterUser(obj)) users.push(obj)
