@@ -1,7 +1,7 @@
 #!/bin/bash
 # nitter-analyze.sh — LLM-driven analysis of nitter posts
 #
-# Reads JSONL posts from stdin (output of nitter-rss-fetch.sh) and uses
+# Reads JSONL posts from stdin (output of nitter-mcp-client.sh) and uses
 # Ollama to extract entities, categorize users, detect trends, and
 # score users for discovery priority.
 #
