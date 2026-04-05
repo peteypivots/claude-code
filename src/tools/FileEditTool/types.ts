@@ -2,9 +2,52 @@ import { z } from 'zod/v4'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
 
+// Parameter aliasing: some models use different param names
+// This preprocessor normalizes the input before schema validation
+function aliasInputParams(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input
+  const obj = input as Record<string, unknown>
+  
+  // Alias: path → file_path
+  if (!obj.file_path && obj.path && typeof obj.path === 'string') {
+    obj.file_path = obj.path
+    delete obj.path
+  }
+  
+  // Alias: old → old_string, oldString → old_string
+  if (!obj.old_string) {
+    if (typeof obj.old === 'string') {
+      obj.old_string = obj.old
+      delete obj.old
+    } else if (typeof obj.oldString === 'string') {
+      obj.old_string = obj.oldString
+      delete obj.oldString
+    }
+  }
+  
+  // Alias: new → new_string, newString → new_string
+  if (!obj.new_string) {
+    if (typeof obj.new === 'string') {
+      obj.new_string = obj.new
+      delete obj.new
+    } else if (typeof obj.newString === 'string') {
+      obj.new_string = obj.newString
+      delete obj.newString
+    }
+  }
+  
+  // Alias: replaceAll → replace_all
+  if (obj.replace_all === undefined && obj.replaceAll !== undefined) {
+    obj.replace_all = obj.replaceAll
+    delete obj.replaceAll
+  }
+  
+  return obj
+}
+
 // The input schema with optional replace_all
 const inputSchema = lazySchema(() =>
-  z.strictObject({
+  z.preprocess(aliasInputParams, z.strictObject({
     file_path: z.string().describe('The absolute path to the file to modify'),
     old_string: z.string().describe('The text to replace'),
     new_string: z
@@ -15,7 +58,7 @@ const inputSchema = lazySchema(() =>
     replace_all: semanticBoolean(
       z.boolean().default(false).optional(),
     ).describe('Replace all occurrences of old_string (default false)'),
-  }),
+  })),
 )
 type InputSchema = ReturnType<typeof inputSchema>
 

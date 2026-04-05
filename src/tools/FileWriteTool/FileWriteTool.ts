@@ -53,15 +53,40 @@ import {
   userFacingName,
 } from './UI.js'
 
+// Parameter aliasing: some models use different param names
+function aliasInputParams(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input
+  const obj = input as Record<string, unknown>
+  
+  // Alias: path → file_path
+  if (!obj.file_path && obj.path && typeof obj.path === 'string') {
+    obj.file_path = obj.path
+    delete obj.path
+  }
+  
+  // Alias: text → content, data → content
+  if (!obj.content) {
+    if (typeof obj.text === 'string') {
+      obj.content = obj.text
+      delete obj.text
+    } else if (typeof obj.data === 'string') {
+      obj.content = obj.data
+      delete obj.data
+    }
+  }
+  
+  return obj
+}
+
 const inputSchema = lazySchema(() =>
-  z.strictObject({
+  z.preprocess(aliasInputParams, z.strictObject({
     file_path: z
       .string()
       .describe(
         'The absolute path to the file to write (must be absolute, not relative)',
       ),
     content: z.string().describe('The content to write to the file'),
-  }),
+  })),
 )
 type InputSchema = ReturnType<typeof inputSchema>
 

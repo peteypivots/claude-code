@@ -224,8 +224,46 @@ function detectSessionFileType(
   return null
 }
 
+// Parameter aliasing: some models use 'files' (array) instead of 'file_path' (string)
+// This preprocessor normalizes the input before schema validation
+function aliasInputParams(input: unknown): unknown {
+  if (typeof input !== 'object' || input === null) return input
+  const obj = input as Record<string, unknown>
+  
+  // Alias: files (array) → file_path (string)
+  if (!obj.file_path && obj.files) {
+    const files = obj.files
+    if (Array.isArray(files) && files.length > 0 && typeof files[0] === 'string') {
+      obj.file_path = files[0]
+    } else if (typeof files === 'string') {
+      obj.file_path = files
+    }
+    delete obj.files
+  }
+  
+  // Alias: path → file_path
+  if (!obj.file_path && obj.path && typeof obj.path === 'string') {
+    obj.file_path = obj.path
+    delete obj.path
+  }
+  
+  // Alias: glob → file_path (model confuses Read with Glob tool)
+  if (!obj.file_path && obj.glob && typeof obj.glob === 'string') {
+    obj.file_path = obj.glob
+    delete obj.glob
+  }
+  
+  // Alias: file → file_path
+  if (!obj.file_path && obj.file && typeof obj.file === 'string') {
+    obj.file_path = obj.file
+    delete obj.file
+  }
+  
+  return obj
+}
+
 const inputSchema = lazySchema(() =>
-  z.strictObject({
+  z.preprocess(aliasInputParams, z.strictObject({
     file_path: z.string().describe('The absolute path to the file to read'),
     offset: semanticNumber(z.number().int().nonnegative().optional()).describe(
       'The line number to start reading from. Only provide if the file is too large to read at once',
@@ -239,7 +277,7 @@ const inputSchema = lazySchema(() =>
       .describe(
         `Page range for PDF files (e.g., "1-5", "3", "10-20"). Only applicable to PDF files. Maximum ${PDF_MAX_PAGES_PER_READ} pages per request.`,
       ),
-  }),
+  })),
 )
 type InputSchema = ReturnType<typeof inputSchema>
 
