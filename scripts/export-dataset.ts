@@ -177,6 +177,81 @@ async function exportRouting(): Promise<RoutingExample[]> {
   }))
 }
 
+// ── Format: Query Rephrase (for training query expansion) ────────
+interface RephraseExample {
+  original_query: string
+  alternative_query: string
+  reason: string
+  success?: boolean
+}
+
+async function exportRephrase(): Promise<RephraseExample[]> {
+  const records = await queryTable(
+    'training_examples',
+    "tags LIKE '%query_rephrase%'",
+  )
+  
+  return records.map(r => {
+    const canonical = r.canonical_prompt as string
+    try {
+      const parsed = JSON.parse(canonical)
+      return {
+        original_query: parsed.original || r.user_content as string,
+        alternative_query: parsed.alternative || r.assistant_content as string,
+        reason: parsed.reason || 'duplicate_results',
+        success: parsed.alternativeSuccess,
+      }
+    } catch {
+      return {
+        original_query: r.user_content as string,
+        alternative_query: r.assistant_content as string,
+        reason: 'duplicate_results',
+      }
+    }
+  })
+}
+
+// ── Format: External API Calls (for API usage analysis) ──────────
+interface ExternalAPIExample {
+  provider: string
+  endpoint: string
+  request: string
+  response: string
+  latency_ms: number
+  rate_limited: boolean
+}
+
+async function exportExternalAPI(): Promise<ExternalAPIExample[]> {
+  const records = await queryTable(
+    'training_examples',
+    "tags LIKE '%external_api%'",
+  )
+  
+  return records.map(r => {
+    const canonical = r.canonical_prompt as string
+    try {
+      const parsed = JSON.parse(canonical)
+      return {
+        provider: parsed.provider || r.model_used as string,
+        endpoint: parsed.endpoint || 'unknown',
+        request: parsed.request || r.user_content as string,
+        response: parsed.response || r.assistant_content as string,
+        latency_ms: r.latency_ms as number || 0,
+        rate_limited: parsed.rateLimited ?? false,
+      }
+    } catch {
+      return {
+        provider: r.model_used as string,
+        endpoint: 'unknown',
+        request: r.user_content as string,
+        response: r.assistant_content as string,
+        latency_ms: r.latency_ms as number || 0,
+        rate_limited: false,
+      }
+    }
+  })
+}
+
 // ── Main ──────────────────────────────────────────────────
 async function main() {
   console.log(`=== Export Training Data ===`)
@@ -207,8 +282,17 @@ async function main() {
       results = await exportRouting()
       break
     }
+    case 'rephrase': {
+      results = await exportRephrase()
+      break
+    }
+    case 'api':
+    case 'external': {
+      results = await exportExternalAPI()
+      break
+    }
     default:
-      console.error(`Unknown format: ${format}. Use: sft, dpo, routing`)
+      console.error(`Unknown format: ${format}. Use: sft, dpo, routing, rephrase, api`)
       process.exit(1)
   }
 
