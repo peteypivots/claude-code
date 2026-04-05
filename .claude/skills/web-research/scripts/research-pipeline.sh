@@ -84,48 +84,8 @@ else:
         DUPLICATES=$((DUPLICATES + 1))
         echo "    Status: DUPLICATE ($DEDUP_LAYER: ${REASON:-duplicate})"
     else
-        echo "    Status: NEW — storing..."
-        # Step 3: Build JSON and pipe to store script
-        FINDING_JSON=$(jq -n \
-            --arg title "$TITLE" \
-            --arg source_url "$URL" \
-            --arg summary "$CONTENT" \
-            --arg query "$QUERY" \
-            --arg canonical_query "$(echo "$QUERY" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9 ]//g' | tr -s ' ')" \
-            --arg domain "$DOMAIN" \
-            --arg timestamp "$TIMESTAMP" \
-            --arg category "$CATEGORY" \
-            '{
-                title: $title,
-                source_url: $source_url,
-                summary: $summary,
-                query: $query,
-                canonical_query: $canonical_query,
-                domain: $domain,
-                timestamp: $timestamp,
-                key_points: [$summary],
-                entities: [],
-                tags: [$category],
-                source_rank: 0.5,
-                source_tier: "web_search"
-            }')
-        
-        STORE_RESULT=$(echo "$FINDING_JSON" | sh "$SCRIPT_DIR/lancedb-store.sh" 2>/dev/null | tail -1)
-        STORE_OK=$(echo "$STORE_RESULT" | jq -r '.stored // false' 2>/dev/null || echo "false")
-        if [ "$STORE_OK" = "true" ]; then
-            STORED=$((STORED + 1))
-            echo "    Result: STORED successfully"
-        else
-            ERRORS=$((ERRORS + 1))
-            REASON=$(echo "$STORE_RESULT" | jq -r '.reason // .error // "unknown"' 2>/dev/null || echo "unknown")
-            if echo "$REASON" | grep -q "DUPLICATE"; then
-                DUPLICATES=$((DUPLICATES + 1))
-                ERRORS=$((ERRORS - 1))
-                echo "    Result: DUPLICATE (store-level: $REASON)"
-            else
-                echo "    Result: STORE FAILED ($REASON)"
-            fi
-        fi
+        echo "    Status: NEW — storage handled by researchCapture.ts in LLM router"
+        STORED=$((STORED + 1))
     fi
     echo ""
     i=$((i + 1))

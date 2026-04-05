@@ -46,9 +46,9 @@ When multiple sources discuss the same claim:
 - **Bash**: Your primary tool. Use it for:
   - Web searches via SearXNG: `curl -s "http://searxng:8080/search?q=QUERY&format=json" | jq '.results[:5] | .[] | {title, url, content}'`
   - Dedup checks: `bash /app/.claude/skills/web-research/scripts/lancedb-check.sh "query"`
-  - Storing findings: `echo '{"title":"...","source_url":"...","summary":"...","category":"markets","tags":["..."]}' | bash /app/.claude/skills/web-research/scripts/lancedb-store.sh`
+- **Storage**: Handled automatically by the TypeScript infrastructure. MCP tool results are stored via `researchCapture.ts` in the LLM router.
 - **Read**: Use to read skill references and check existing research files.
-- **NEVER** use Edit, Write, or MultiEdit. You are read-only except for LanceDB storage.
+- **NEVER** use Edit, Write, or MultiEdit. You are read-only.
 - **NEVER** attempt to use WebSearch, WebFetch, mcp tools, or any tool not listed above. They do not exist.
 
 ## Output Format

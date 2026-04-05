@@ -142,21 +142,15 @@ Compare findings across sources:
 
 ### Step 9: Store Novel Insights
 
-Run `.claude/skills/web-research/scripts/lancedb-store.sh` for each finding that passes ALL checks:
+Storage is handled automatically by the TypeScript infrastructure (`researchCapture.ts`).
+When MCP tool results flow through the LLM router, structured research and nitter data
+are automatically detected, deduplicated, and stored in LanceDB.
 
-**Store if:**
-- Adds genuinely new information not in existing findings
-- Comes from a new source with new facts
-- Contains specific data points, dates, names, numbers
-- `key_points[]` overlap with existing findings is <70%
-
-**Do NOT store if:**
-- Duplicate information from a different source (same facts, different wording)
-- `key_points[]` overlap >70% with any existing finding
-- Low-quality summary without specific facts
-- Pure opinion without new factual claims
-- Content already covered by a higher-ranked source
-- Paywalled content where only the headline was accessible
+**No manual storage steps needed** — the infrastructure handles:
+- Research findings → `research_findings` table
+- Nitter tweets → `nitter_posts` table
+- Nitter users → `nitter_users` table
+- Nitter relationships → `nitter_relationships` table
 
 ### Step 10: Synthesize Report
 
@@ -210,7 +204,7 @@ This handles:
 ## Helper Scripts
 
 - **Dedup check**: `.claude/skills/web-research/scripts/lancedb-check.sh`
-- **Store finding**: `.claude/skills/web-research/scripts/lancedb-store.sh`
+- **Storage**: Handled automatically by `researchCapture.ts` in the LLM router (no bash scripts needed)
 
 Run these via the Bash tool. See [LanceDB queries reference](./references/lancedb-queries.md) for schema details.
 

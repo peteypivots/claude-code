@@ -185,8 +185,22 @@ pick_queries() {
 
 RESEARCH_PROMPT="$(cat /app/.claude/prompts/research-system.md)"
 
-# Create empty MCP config to prevent MCP tools from loading
-echo '{"mcpServers":{}}' > /tmp/empty-mcp.json
+# MCP config with meta-ai-mcp for web research
+MCP_CONFIG_FILE="/tmp/meta-ai-mcp-config.json"
+META_AI_MCP_URL="${META_AI_MCP_URL:-http://meta-ai-mcp:8099}"
+cat > "$MCP_CONFIG_FILE" <<MCPEOF
+{
+  "mcpServers": {
+    "meta-ai-mcp": {
+      "type": "http",
+      "url": "${META_AI_MCP_URL}/"
+    }
+  }
+}
+MCPEOF
+
+# Nitter storage is now handled by TypeScript layer (src/services/llm/researchCapture.ts)
+# MCP tool results flow through queryModelRouter → captureResearchFindings automatically
 
 # Training data capture is now handled by TypeScript layer (src/services/llm/trainingCapture.ts)
 # Configured via .env or docker-compose.yml
@@ -291,7 +305,7 @@ Output ONLY the queries, one per line. No numbering, no explanation."
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
     bun /app/cli.mjs \
       --tools "" \
-      --mcp-config /tmp/empty-mcp.json \
+      --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
       -p "$gen_prompt" 2>/dev/null)
@@ -311,25 +325,24 @@ Output ONLY the queries, one per line. No numbering, no explanation."
 
 run_agent_query() {
   local query="$1"
-  local encoded_query
-  encoded_query=$(echo "$query" | sed 's/ /+/g')
 
-  # Build a prompt that gives the model ONE bash command to run the full pipeline
-  local prompt="Use Bash to run this command:
-bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
+  # Simple prompt: just ask Meta AI about the topic and return the answer
+  # The bash script handles storage — the model doesn't need to run pipeline scripts
+  local prompt="Use the meta_ai_chat tool to research: \"${query}\"
+
+Return the full Meta AI response as your answer. Do NOT call any other tools. Do NOT try to store results. Just call meta_ai_chat and return what it says."
 
   echo "[$(date)] Agent query: $query" >> "$LOG"
 
   local result
-  result=$(LOCAL_SYSTEM_PROMPT="$RESEARCH_PROMPT" \
+  result=$(LOCAL_SYSTEM_PROMPT="You are a research assistant. Call the meta_ai_chat tool with the user's query, then return the response verbatim. Do not call Bash or any other tool." \
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
-    bun /app/cli.mjs \
-      --agent web-researcher \
-      --tools "Bash,Read" \
-      --mcp-config /tmp/empty-mcp.json \
+    timeout 120 bun /app/cli.mjs \
+      --tools "" \
+      --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
-      -p "$prompt" 2>/dev/null)
+      -p "$prompt" 2>/dev/null) || true
 
   # Extract only the JSON line (last line starting with {)
   local json_line
@@ -341,36 +354,22 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
   local duration
   duration=$(echo "$json_line" | jq -r '.duration_ms // 0' 2>/dev/null || echo "?")
 
-  # Detect text-only response (model hallucinated instead of using tools)
-  # Indicators: turns=1, or answer contains "Found **" without pipeline output
-  local used_tools=true
-  if [ "$turns" = "1" ]; then
-    used_tools=false
-  elif echo "$answer" | grep -qE "^Found \*\*|^I found|^Here are|relevant results"; then
-    # Model described results as text instead of running pipeline
-    if ! echo "$answer" | grep -qE "RESEARCH PIPELINE|STORED|DUPLICATE"; then
-      used_tools=false
-    fi
-  fi
-
-  if [ "$used_tools" = "false" ]; then
-    echo "[$(date)]   ⚠️  Model gave text-only response, running pipeline directly..." >> "$LOG"
-    
-    # Run fallback pipeline
-    local fallback_result
-    fallback_result=$(bash /app/.claude/skills/web-research/scripts/research-pipeline.sh "$query" 2>/dev/null)
-    local stored
-    stored=$(echo "$fallback_result" | grep -c "STORED" || echo "0")
-    local dupes
-    dupes=$(echo "$fallback_result" | grep -c "DUPLICATE" || echo "0")
-    
-    echo "[$(date)]   Fallback: stored=$stored, dupes=$dupes" >> "$LOG"
-    answer="[FALLBACK] Pipeline ran directly: $stored stored, $dupes duplicates"
-    turns="fallback"
-  fi
-
   echo "[$(date)]   Turns: $turns | Duration: ${duration}ms" >> "$LOG"
-  echo "[$(date)]   Answer: ${answer:0:200}" >> "$LOG"
+
+  # Always store whatever the model returned via the pipeline script
+  # (regardless of whether the model used tools or hallucinated)
+  if [ -n "$answer" ] && [ "$answer" != "no result" ] && [ "$answer" != "parse error" ]; then
+    local store_result
+    store_result=$(bash /app/.claude/skills/web-research/scripts/meta-ai-pipeline.sh "$query" "$answer" 2>/dev/null || echo "store_error")
+    local stored
+    stored=$(echo "$store_result" | grep -c "STORED" || echo "0")
+    local dupes
+    dupes=$(echo "$store_result" | grep -c "DUPLICATE" || echo "0")
+    echo "[$(date)]   Stored: $stored new, $dupes dupes | Answer: ${answer:0:150}" >> "$LOG"
+  else
+    echo "[$(date)]   ⚠️  No usable response: ${answer:0:100}" >> "$LOG"
+  fi
+
   echo "---" >> "$LOG"
 }
 
@@ -381,23 +380,23 @@ run_worker_query() {
   local worker_id="$2"
   local result_file="$3"
 
-  # Build a prompt that gives the model ONE bash command to run the full pipeline
-  local prompt="Use Bash to run this command:
-bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
+  # Simple prompt — model just calls meta_ai_chat, bash handles storage
+  local prompt="Use the meta_ai_chat tool to research: \"${query}\"
+
+Return the full Meta AI response as your answer. Do NOT call any other tools."
 
   local start_ms
   start_ms=$(date +%s%3N)
 
   local result
-  result=$(LOCAL_SYSTEM_PROMPT="$RESEARCH_PROMPT" \
+  result=$(LOCAL_SYSTEM_PROMPT="You are a research assistant. Call the meta_ai_chat tool with the user's query, then return the response verbatim. Do not call Bash or any other tool." \
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
-    bun /app/cli.mjs \
-      --agent web-researcher \
-      --tools "Bash,Read" \
-      --mcp-config /tmp/empty-mcp.json \
+    timeout 120 bun /app/cli.mjs \
+      --tools "" \
+      --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
-      -p "$prompt" 2>/dev/null)
+      -p "$prompt" 2>/dev/null) || true
 
   local end_ms
   end_ms=$(date +%s%3N)
@@ -411,27 +410,16 @@ bash /app/.claude/skills/web-research/scripts/research-pipeline.sh \"${query}\""
   local turns
   turns=$(echo "$json_line" | jq -r '.num_turns // 0' 2>/dev/null || echo "?")
 
-  # Detect text-only response
-  local used_tools=true
-  if [ "$turns" = "1" ]; then
-    used_tools=false
-  elif echo "$answer" | grep -qE "^Found \*\*|^I found|^Here are|relevant results"; then
-    if ! echo "$answer" | grep -qE "RESEARCH PIPELINE|STORED|DUPLICATE"; then
-      used_tools=false
-    fi
-  fi
-
-  if [ "$used_tools" = "false" ]; then
-    # Model gave text instead of tool call - run fallback pipeline
-    local fallback_result
-    fallback_result=$(bash /app/.claude/skills/web-research/scripts/research-pipeline.sh "$query" 2>/dev/null)
+  # Always store the response via pipeline
+  if [ -n "$answer" ] && [ "$answer" != "no result" ] && [ "$answer" != "parse error" ]; then
+    local store_result
+    store_result=$(bash /app/.claude/skills/web-research/scripts/meta-ai-pipeline.sh "$query" "$answer" 2>/dev/null || echo "store_error")
     local stored
-    stored=$(echo "$fallback_result" | grep -c "STORED" || echo "0")
+    stored=$(echo "$store_result" | grep -c "STORED" || echo "0")
     local dupes
-    dupes=$(echo "$fallback_result" | grep -c "DUPLICATE" || echo "0")
+    dupes=$(echo "$store_result" | grep -c "DUPLICATE" || echo "0")
     
-    answer="[FALLBACK] stored=$stored, dupes=$dupes"
-    turns="fallback"
+    answer="stored=$stored, dupes=$dupes"
   fi
 
   # Write result to file for main process to collect
@@ -523,7 +511,7 @@ After all workers complete, report:
     bun /app/cli.mjs \
       --agent research-batch-orchestrator \
       --tools "Agent,Bash,Read" \
-      --mcp-config /tmp/empty-mcp.json \
+      --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
       -p "$prompt" 2>/dev/null)
