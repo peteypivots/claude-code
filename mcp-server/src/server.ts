@@ -18,6 +18,11 @@ import {
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  crawlerToolDefinitions,
+  handleCrawlerTool,
+  isCrawlerTool,
+} from "./crawler.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -382,6 +387,8 @@ export function createServer(): Server {
           "Get a high-level architecture overview of Claude Code.",
         inputSchema: { type: "object" as const, properties: {} },
       },
+      // ---- Crawler Tools ----
+      ...crawlerToolDefinitions,
     ],
   }));
 
@@ -391,6 +398,11 @@ export function createServer(): Server {
       params: { name: string; arguments?: Record<string, unknown> };
     }) => {
       const { name, arguments: args } = request.params;
+
+      // Handle crawler tools
+      if (isCrawlerTool(name)) {
+        return handleCrawlerTool(name, args ?? {});
+      }
 
       switch (name) {
         case "list_tools": {
