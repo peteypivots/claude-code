@@ -48,7 +48,9 @@ import { dirname, parse, relative, resolve } from 'path'
 import { getCwd } from 'src/utils/cwd.js'
 import { getViewedTeammateTask } from '../state/selectors.js'
 import { logError } from './log.js'
+import { logForDebugging } from './debug.js'
 import { logAntError } from './debug.js'
+import { appendFileSync } from 'fs'
 import { isENOENT, toError } from './errors.js'
 import type { DiagnosticFile } from '../services/diagnosticTracking.js'
 import { diagnosticTracker } from '../services/diagnosticTracking.js'
@@ -230,6 +232,8 @@ import { getPDFPageCount } from './pdf.js'
 import { PDF_AT_MENTION_INLINE_THRESHOLD } from '../constants/apiLimits.js'
 import { isAgentSwarmsEnabled } from './agentSwarmsEnabled.js'
 import { findRelevantMemories } from '../memdir/findRelevantMemories.js'
+import { findRelevantResearch, isResearchRecallEnabled, type ResearchFinding } from '../memdir/findRelevantResearch.js'
+import { recallMemoriesFromLanceDB, type MemoryRecallResult } from '../memdir/vectorMemorySelector.js'
 import { memoryAge, memoryFreshnessText } from '../memdir/memoryAge.js'
 import { getAutoMemPath, isAutoMemoryEnabled } from '../memdir/paths.js'
 import { getAgentMemoryDir } from '../tools/AgentTool/agentMemory.js'
@@ -519,6 +523,22 @@ export type Attachment =
          * yield a misleading diff).
          */
         limit?: number
+      }[]
+    }
+  | {
+      type: 'relevant_research'
+      findings: {
+        id: string
+        query: string
+        source_url: string
+        domain: string
+        title: string
+        summary: string
+        key_points: string[]
+        timestamp: string
+        source_rank: number
+        /** Distance from query (lower = more similar) */
+        _distance?: number
       }[]
     }
   | {
@@ -2242,6 +2262,92 @@ async function getRelevantMemoryAttachments(
 }
 
 /**
+ * Get relevant memories directly from LanceDB (no file reads).
+ * Faster than file-based recall, works without filesystem access.
+ * Used alongside file-based recall - LanceDB has full content stored.
+ */
+async function getDirectMemoryAttachments(
+  input: string,
+  alreadySurfaced: ReadonlySet<string>,
+): Promise<Attachment[]> {
+  // Only use direct recall when local-first mode is active
+  if (!process.env.OLLAMA_BASE_URL && process.env.LOCAL_FIRST !== 'true') {
+    return []
+  }
+
+  try {
+    const result = await recallMemoriesFromLanceDB(input, 5)
+    if (result.memories.length === 0) {
+      return []
+    }
+
+    // Filter out already-surfaced memories
+    const filtered = result.memories.filter(m => !alreadySurfaced.has(m.filepath))
+    if (filtered.length === 0) {
+      return []
+    }
+
+    // Convert to relevant_memories format (uses the same rendering)
+    return [{
+      type: 'relevant_memories' as const,
+      memories: filtered.map(m => ({
+        path: m.filepath,
+        content: m.content,
+        mtimeMs: m.mtime_ms,
+        header: `Memory: ${m.filename} (${formatAge(m.mtime_ms)})`,
+      })),
+    }]
+  } catch {
+    return []
+  }
+}
+
+function formatAge(mtimeMs: number): string {
+  const days = Math.floor((Date.now() - mtimeMs) / (1000 * 60 * 60 * 24))
+  if (days === 0) return 'saved today'
+  if (days === 1) return 'saved yesterday'
+  if (days < 7) return `saved ${days} days ago`
+  if (days < 30) return `saved ${Math.floor(days / 7)} weeks ago`
+  return `saved ${Math.floor(days / 30)} months ago`
+}
+
+/**
+ * Get relevant research findings from LanceDB for the current input.
+ * Uses semantic search via embeddings to find past research that may help.
+ */
+async function getRelevantResearchAttachments(
+  input: string,
+): Promise<Attachment[]> {
+  if (!isResearchRecallEnabled()) {
+    return []
+  }
+
+  try {
+    const result = await findRelevantResearch(input)
+    if (result.findings.length === 0) {
+      return []
+    }
+    return [{
+      type: 'relevant_research' as const,
+      findings: result.findings.map(f => ({
+        id: f.id,
+        query: f.query,
+        source_url: f.source_url,
+        domain: f.domain,
+        title: f.title,
+        summary: f.summary,
+        key_points: f.key_points,
+        timestamp: f.timestamp,
+        source_rank: f.source_rank,
+        _distance: f._distance,
+      })),
+    }]
+  } catch {
+    return []
+  }
+}
+
+/**
  * Scan messages for past relevant_memories attachments.  Returns both the
  * set of surfaced paths (for selector de-dup) and cumulative byte count
  * (for session-total throttle).  Scanning messages rather than tracking
@@ -2358,14 +2464,25 @@ export type MemoryPrefetch = {
  * injections) and kicks off a non-blocking search. Returns a Disposable
  * handle with settlement tracking. Bound with `using` in query.ts.
  */
+
+const ROUTER_DEBUG_LOG = process.env.ROUTER_DEBUG_LOG ?? '/data/logs/router-debug.log'
+function memoryPrefetchLog(msg: string) {
+  const ts = new Date().toISOString()
+  try {
+    appendFileSync(ROUTER_DEBUG_LOG, `${ts} [MemoryPrefetch] ${msg}\n`)
+  } catch { /* ignore */ }
+}
+
 export function startRelevantMemoryPrefetch(
   messages: ReadonlyArray<Message>,
   toolUseContext: ToolUseContext,
 ): MemoryPrefetch | undefined {
-  if (
-    !isAutoMemoryEnabled() ||
-    !getFeatureValue_CACHED_MAY_BE_STALE('tengu_moth_copse', false)
-  ) {
+  const isAutoMem = isAutoMemoryEnabled()
+  const isLocalFirst = !!(process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true')
+  const isFeatureOn = isLocalFirst || getFeatureValue_CACHED_MAY_BE_STALE('tengu_moth_copse', false)
+  memoryPrefetchLog(`CHECK: isAutoMemoryEnabled=${isAutoMem}, tengu_moth_copse=${isFeatureOn}, LOCAL_FIRST=${isLocalFirst}`)
+  if (!isAutoMem || !isFeatureOn) {
+    memoryPrefetchLog(`BLOCKED: isAutoMem=${isAutoMem}, isFeatureOn=${isFeatureOn}`)
     return undefined
   }
 
@@ -2389,19 +2506,42 @@ export function startRelevantMemoryPrefetch(
   // immediately, not just on [Symbol.dispose] when queryLoop exits.
   const controller = createChildAbortController(toolUseContext.abortController)
   const firedAt = Date.now()
-  const promise = getRelevantMemoryAttachments(
-    input,
-    toolUseContext.options.agentDefinitions.activeAgents,
-    toolUseContext.readFileState,
-    collectRecentSuccessfulTools(messages, lastUserMessage),
-    controller.signal,
-    surfaced.paths,
-  ).catch(e => {
+  
+  // In local-first mode, prefer direct LanceDB recall (faster, no file reads)
+  // Fall back to file-based recall if direct recall returns nothing
+  // (isLocalFirst is already defined at the top of this function)
+  
+  // Fetch memories (direct LanceDB in local-first, file-based otherwise)
+  const memoriesPromise = (async () => {
+    if (isLocalFirst) {
+      // Try direct LanceDB recall first
+      const directResults = await getDirectMemoryAttachments(input, surfaced.paths).catch(() => [])
+      if (directResults.length > 0) {
+        return directResults
+      }
+    }
+    // Fall back to file-based recall
+    return getRelevantMemoryAttachments(
+      input,
+      toolUseContext.options.agentDefinitions.activeAgents,
+      toolUseContext.readFileState,
+      collectRecentSuccessfulTools(messages, lastUserMessage),
+      controller.signal,
+      surfaced.paths,
+    )
+  })().catch(e => {
     if (!isAbortError(e)) {
       logError(e)
     }
     return []
   })
+
+  const researchPromise = getRelevantResearchAttachments(input).catch(() => [])
+
+  // Combine both attachment types
+  const promise = Promise.all([memoriesPromise, researchPromise]).then(
+    ([memories, research]) => [...memories, ...research]
+  )
 
   const handle: MemoryPrefetch = {
     promise,

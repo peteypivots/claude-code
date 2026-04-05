@@ -179,6 +179,52 @@ const MEMORY_CORRECTION_HINT =
 const TOOL_REFERENCE_TURN_BOUNDARY = 'Tool loaded.'
 
 /**
+ * Format research findings for injection into agent context.
+ * Returns a formatted string suitable for a system reminder.
+ */
+function formatResearchFindings(findings: Array<{
+  title: string
+  domain: string
+  summary: string
+  key_points: string[]
+  timestamp: string
+  query: string
+  source_url: string
+}>): string {
+  if (findings.length === 0) return ''
+
+  const lines: string[] = [
+    '<relevant-research>',
+    'The following research findings from previous sessions may be relevant:',
+    ''
+  ]
+
+  for (const f of findings) {
+    lines.push(`### ${f.title}`)
+    lines.push(`Source: ${f.domain} | ${f.timestamp}`)
+    lines.push(`Query: "${f.query}"`)
+    lines.push('')
+    lines.push(f.summary)
+    if (f.key_points?.length > 0) {
+      lines.push('')
+      lines.push('Key points:')
+      for (const point of f.key_points) {
+        lines.push(`  - ${point}`)
+      }
+    }
+    if (f.source_url) {
+      lines.push(`URL: ${f.source_url}`)
+    }
+    lines.push('')
+    lines.push('---')
+    lines.push('')
+  }
+
+  lines.push('</relevant-research>')
+  return lines.join('\n')
+}
+
+/**
  * Appends a memory correction hint to a rejection/cancellation message
  * when auto-memory is enabled and the GrowthBook flag is on.
  */
@@ -3745,6 +3791,18 @@ Read the team config to discover your teammates' names. Check the task list peri
           })
         }),
       )
+    }
+    case 'relevant_research': {
+      if (attachment.findings.length === 0) {
+        return []
+      }
+      const content = formatResearchFindings(attachment.findings)
+      return wrapMessagesInSystemReminder([
+        createUserMessage({
+          content,
+          isMeta: true,
+        }),
+      ])
     }
     case 'dynamic_skill': {
       // Dynamic skills are informational for the UI only - the skills themselves
