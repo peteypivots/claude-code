@@ -11,6 +11,8 @@ import { dirname, join } from 'path'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { captureToolLoopRecovery, captureSuccessfulToolUse, captureMultiTurn, isCaptureEnabled } from './trainingCapture.js'
 import { captureResearchFindings, isResearchCaptureEnabled } from './researchCapture.js'
+import { captureRoutingDecision, captureForceAnswer, isDecisionCaptureEnabled } from './decisionCapture.js'
+import { findRelevantResearch, isResearchRecallEnabled, formatResearchForContext } from '../../memdir/findRelevantResearch.js'
 
 const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
 
@@ -249,7 +251,7 @@ export async function getRoutingDecisionAsync(
   retryCount = 0,
 ): Promise<RoutingDecision> {
   if (!config.enabled) {
-    return { useLocal: false, reason: 'routing_disabled', model: 'claude' }
+    return { useLocal: false, reason: 'routing_disabled', model: 'claude', action: 'escalate', confidence: 0.5 }
   }
 
   // Do not skip the orchestrator when Anthropic key is missing.
@@ -261,7 +263,7 @@ export async function getRoutingDecisionAsync(
   // Get last user message content
   const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
   if (!lastUserMsg || lastUserMsg.type !== 'user') {
-    return { useLocal: true, reason: 'no_user_message', model: config.localModel }
+    return { useLocal: true, reason: 'no_user_message', model: config.localModel, action: 'local', confidence: 0.5 }
   }
 
   const content = typeof lastUserMsg.message.content === 'string'
@@ -318,6 +320,7 @@ function mapOrchestratorDecision(
         reason: decision.reasoning,
         model: decision.model || config.localModel,
         action: 'local',
+        confidence: decision.confidence || 0.7,
         suggestedTool: decision.suggestedTool,
       }
 
@@ -328,6 +331,7 @@ function mapOrchestratorDecision(
         reason: decision.reasoning,
         model: decision.model || 'deepseek-r1:7b',
         action: 'reason',
+        confidence: decision.confidence || 0.7,
         suggestedTool: decision.suggestedTool,
       }
 
@@ -341,6 +345,7 @@ function mapOrchestratorDecision(
           reason: `${decision.reasoning} [overridden→local: no Claude key]`,
           model: config.localModel,
           action: 'local',
+          confidence: decision.confidence || 0.5,
           suggestedTool: decision.suggestedTool,
         }
       }
@@ -349,6 +354,7 @@ function mapOrchestratorDecision(
         reason: decision.reasoning,
         model: decision.model || 'claude-sonnet-4-20250514',
         action: 'escalate',
+        confidence: decision.confidence || 0.7,
         suggestedTool: decision.suggestedTool,
       }
 
@@ -358,6 +364,7 @@ function mapOrchestratorDecision(
         reason: 'default',
         model: config.localModel,
         action: 'local',
+        confidence: 0.5,
       }
   }
 }
@@ -383,13 +390,13 @@ function shouldUseLocalModelStatic(
   config: RouterConfig = DEFAULT_CONFIG,
 ): RoutingDecision {
   if (!config.enabled) {
-    return { useLocal: false, reason: 'routing_disabled', model: 'claude' }
+    return { useLocal: false, reason: 'routing_disabled', model: 'claude', action: 'escalate', confidence: 0.5 }
   }
 
   // Get last user message
   const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
   if (!lastUserMsg || lastUserMsg.type !== 'user') {
-    return { useLocal: true, reason: 'no_user_message', model: config.localModel }
+    return { useLocal: true, reason: 'no_user_message', model: config.localModel, action: 'local', confidence: 0.5 }
   }
 
   const content = typeof lastUserMsg.message.content === 'string'
@@ -407,12 +414,12 @@ function shouldUseLocalModelStatic(
   ]
   
   if (escalationKeywords.some(kw => content.toLowerCase().includes(kw))) {
-    return { useLocal: false, reason: 'escalation_keyword', model: 'claude' }
+    return { useLocal: false, reason: 'escalation_keyword', model: 'claude', action: 'escalate', confidence: 0.6 }
   }
 
   // Check message length (proxy for complexity)
   if (content.length > config.complexityThreshold) {
-    return { useLocal: false, reason: 'long_input', model: 'claude' }
+    return { useLocal: false, reason: 'long_input', model: 'claude', action: 'escalate', confidence: 0.6 }
   }
 
   // Tool count is not a complexity indicator — local model handles tools fine
@@ -420,11 +427,11 @@ function shouldUseLocalModelStatic(
   // Check conversation depth
   const assistantMsgCount = messages.filter(m => m.type === 'assistant').length
   if (assistantMsgCount > 25) {
-    return { useLocal: false, reason: 'deep_conversation', model: 'claude' }
+    return { useLocal: false, reason: 'deep_conversation', model: 'claude', action: 'escalate', confidence: 0.6 }
   }
 
   // Default: use local
-  return { useLocal: true, reason: 'default', model: config.localModel }
+  return { useLocal: true, reason: 'default', model: config.localModel, action: 'local', confidence: 0.7 }
 }
 
 // ============================================================================
@@ -462,12 +469,74 @@ function convertMessagesToLLM(messages: Message[]): LLMRequestOptions['messages'
     } else if (m.type === 'assistant') {
       const hasToolUse = m.message.content.some((c: any) => c.type === 'tool_use')
       routerLog(`  - assistant message: hasToolUse=${hasToolUse}`)
+    } else if (m.type === 'attachment') {
+      const att = (m as any).attachment
+      routerLog(`  - attachment message: subtype=${att?.type ?? 'unknown'}`)
     } else {
       routerLog(`  - ${m.type} message (filtered out)`)
     }
   }
+
+  // Convert attachment messages to user messages first
+  const expandedMessages: Message[] = []
+  for (const m of messages) {
+    if (m.type === 'attachment') {
+      const att = (m as any).attachment
+      let content: string | null = null
+      
+      if (att?.type === 'relevant_research' && att.findings?.length > 0) {
+        // Format research findings as context
+        const lines: string[] = [
+          '<relevant-research>',
+          'The following research findings from previous sessions may be relevant:',
+          ''
+        ]
+        for (const f of att.findings) {
+          lines.push(`### ${f.title ?? 'Untitled'}`)
+          if (f.domain || f.timestamp) {
+            lines.push(`Source: ${f.domain ?? 'unknown'} | ${f.timestamp ?? ''}`)
+          }
+          if (f.query) lines.push(`Query: "${f.query}"`)
+          lines.push('')
+          if (f.summary) lines.push(f.summary)
+          if (f.key_points?.length > 0) {
+            lines.push('')
+            lines.push('Key points:')
+            for (const point of f.key_points) {
+              lines.push(`  - ${point}`)
+            }
+          }
+          if (f.source_url) lines.push(`URL: ${f.source_url}`)
+          lines.push('')
+          lines.push('---')
+          lines.push('')
+        }
+        lines.push('</relevant-research>')
+        content = lines.join('\n')
+      } else if (att.type === 'memory_attachment' && att.memories?.length > 0) {
+        // Format memory attachments
+        const lines: string[] = ['<memory-context>']
+        for (const mem of att.memories) {
+          if (mem.content) lines.push(mem.content)
+        }
+        lines.push('</memory-context>')
+        content = lines.join('\n')
+      }
+      
+      if (content) {
+        routerLog(`  [attachment expanded] ${att.type}: ${content.length} chars`)
+        expandedMessages.push({
+          type: 'user',
+          conversationId: m.conversationId,
+          message: { role: 'user', content },
+        } as Message)
+      }
+    } else {
+      expandedMessages.push(m)
+    }
+  }
   
-  return messages
+  return expandedMessages
     .filter(m => m.type === 'user' || m.type === 'assistant')
     .map(m => {
       if (m.type === 'user') {
@@ -756,11 +825,24 @@ export async function* queryModelWithRouting(
   }
 
   // ── RAG: retrieve similar high-quality examples ─────────
-  const fullUserQuery = lastUserMsg?.type === 'user'
-    ? (typeof lastUserMsg.message?.content === 'string'
-        ? lastUserMsg.message.content
-        : '[complex content]')
-    : ''
+  // Extract user query — find first user message with real text content
+  let fullUserQuery = ''
+  for (const m of messages) {
+    if (m.type !== 'user') continue
+    const content = m.message?.content
+    if (typeof content === 'string' && content.length > 0) {
+      const stripped = content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+      if (stripped.length > 10) { fullUserQuery = stripped; break }
+      if (!fullUserQuery) fullUserQuery = content
+    } else if (Array.isArray(content)) {
+      const textParts = content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text || '')
+        .join(' ')
+        .trim()
+      if (textParts.length > 10) { fullUserQuery = textParts; break }
+    }
+  }
   const ragExamples = await retrieveSimilarExamples(fullUserQuery)
   const ragContext = formatRAGContext(ragExamples)
   if (ragExamples.length > 0) {
@@ -777,6 +859,7 @@ export async function* queryModelWithRouting(
 
   // Get routing decision (async - may call orchestrator)
   let decision = await getRoutingDecisionAsync(messages, tools, config)
+  const routingLatencyMs = Date.now() - routingStartTime
 
   // Log routing decision prominently
   const routeEmoji = decision.useLocal ? '🏠' : '☁️'
@@ -785,6 +868,31 @@ export async function* queryModelWithRouting(
   routerLog(`   Reason: ${decision.reason}`, 'debug')
   if (decision.suggestedTool) {
     routerLog(`   Suggested tool: ${decision.suggestedTool}`, 'info')
+  }
+
+  // Capture routing decision
+  if (isDecisionCaptureEnabled()) {
+    const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
+    const userQuery = lastUserMsg && lastUserMsg.type === 'user'
+      ? (typeof lastUserMsg.message.content === 'string'
+          ? lastUserMsg.message.content
+          : lastUserMsg.message.content
+              .filter((c: any) => c.type === 'text')
+              .map((c: any) => c.text)
+              .join(' '))
+      : 'unknown'
+    
+    captureRoutingDecision({
+      userQuery: userQuery.substring(0, 500),
+      decision: decision.action as 'local' | 'reason' | 'escalate',
+      model: decision.model || 'unknown',
+      confidence: decision.confidence || 0.7,
+      reasoning: decision.reason,
+      suggestedTool: decision.suggestedTool,
+      context: {
+        sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+      },
+    }).catch(() => {})  // Fire and forget
   }
 
   // Handle escalation to Claude (with fallback to local+tools if Claude fails)
@@ -863,7 +971,7 @@ async function* handleReasoningAction(
     
     yield createAssistantMessage(content, 'deepseek-r1:7b', reasoningResult.usage, {
       routingDecision: 'reason',
-      routingConfidence: decision.confidence,
+      routingConfidence: decision.confidence || 0.7,
       latencyMs: reasoningResult.durationMs,
     })
     recordLocalCall(reasoningResult.usage.inputTokens + reasoningResult.usage.outputTokens)
@@ -881,7 +989,7 @@ async function* handleReasoningAction(
           sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
           model: 'deepseek-r1:7b',
           routingDecision: 'reason',
-          routingConfidence: decision.confidence ?? 0.7,
+          routingConfidence: decision.confidence || 0.7,
           routingReason: decision.reason,
           suggestedTool: decision.suggestedTool,
           inputTokens: reasoningResult.usage.inputTokens,
@@ -911,12 +1019,33 @@ async function* handleLocalAction(
   const { messages, systemPrompt, tools, signal } = params
 
   // Extract user query for capture (mirrors extraction in queryModelWithRouting)
+  // Find the first user message with actual text content (not tool results)
   const lastUserMsg = [...messages].reverse().find(m => m.type === 'user')
-  const fullUserQuery = lastUserMsg?.type === 'user'
-    ? (typeof lastUserMsg.message?.content === 'string'
-        ? lastUserMsg.message.content
-        : '[complex content]')
-    : ''
+  let fullUserQuery = ''
+  for (const m of messages) {
+    if (m.type !== 'user') continue
+    const content = m.message?.content
+    if (typeof content === 'string' && content.length > 0) {
+      // Strip <system-reminder> wrapper if present
+      const stripped = content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim()
+      if (stripped.length > 10) {
+        fullUserQuery = stripped
+        break
+      }
+      // If after stripping there's nothing, use the raw content
+      if (!fullUserQuery) fullUserQuery = content
+    } else if (Array.isArray(content)) {
+      const textParts = content
+        .filter((c: any) => c.type === 'text')
+        .map((c: any) => c.text || '')
+        .join(' ')
+        .trim()
+      if (textParts.length > 10) {
+        fullUserQuery = textParts
+        break
+      }
+    }
+  }
 
   // Use local model
   const provider = getOllamaProvider(config)
@@ -965,6 +1094,23 @@ async function* handleLocalAction(
       routerLog(`SystemPrompt augmented with RAG context (+${ragCtx.length} chars)`)
     }
 
+    // Append relevant research findings from LanceDB (local-first RAG)
+    // This runs synchronously before model call to inject past research into context
+    if (isResearchRecallEnabled()) {
+      try {
+        const researchResult = await findRelevantResearch(fullUserQuery, 5, 0.70)
+        if (researchResult.findings.length > 0) {
+          const researchContext = formatResearchForContext(researchResult.findings)
+          systemPromptText += `\n\n${researchContext}`
+          routerLog(`Appended ${researchResult.findings.length} research findings to system prompt (+${researchContext.length} chars)`, 'success')
+        } else {
+          routerLog(`Research recall found no relevant findings for: "${fullUserQuery.slice(0, 50)}..."`)
+        }
+      } catch (e: any) {
+        routerLog(`Research recall failed: ${e.message}`, 'warn')
+      }
+    }
+
     // If the orchestrator suggested a tool, hint the model to use it
     if (decision.suggestedTool) {
       // In coordinator mode, the model only has Agent + TaskStop.
@@ -978,28 +1124,35 @@ async function* handleLocalAction(
       routerLog(`Added suggestedTool hint for: ${decision.suggestedTool}`)
     }
 
-    // Check if we already have web search results in the conversation - if so, tell the model to answer
+    // Check if we already have web search results in the conversation - if so, tell the model to answer.
+    // SKIP this for multi-tool workers (those with MCP tools) — they need to continue calling
+    // nitter, meta-ai, etc. after WebSearch. Only force-answer for single-tool sessions.
+    const hasMcpTools = tools.some(t => t.name?.startsWith('mcp__') || t.name?.startsWith('mcp_'))
     let webSearchContent: string | null = null
-    for (const m of messages) {
-      // Messages use 'type' not 'role', and user content is in m.message.content
-      if (m.type === 'user') {
-        const msgContent = (m as any).message?.content
-        if (Array.isArray(msgContent)) {
-          for (const c of msgContent) {
-            if (c.type === 'tool_result') {
-              const content = typeof c.content === 'string' 
-                ? c.content 
-                : JSON.stringify(c.content)
-              if (content.includes('Web search results for query') || content.includes('Key information found')) {
-                webSearchContent = content
-                routerLog('Detected web search results in conversation')
-                break
+    if (!hasMcpTools) {
+      for (const m of messages) {
+        // Messages use 'type' not 'role', and user content is in m.message.content
+        if (m.type === 'user') {
+          const msgContent = (m as any).message?.content
+          if (Array.isArray(msgContent)) {
+            for (const c of msgContent) {
+              if (c.type === 'tool_result') {
+                const content = typeof c.content === 'string' 
+                  ? c.content 
+                  : JSON.stringify(c.content)
+                if (content.includes('Web search results for query') || content.includes('Key information found')) {
+                  webSearchContent = content
+                  routerLog('Detected web search results in conversation')
+                  break
+                }
               }
             }
+            if (webSearchContent) break
           }
-          if (webSearchContent) break
         }
       }
+    } else {
+      routerLog('Skipping force-answer-after-WebSearch: MCP tools present (multi-tool worker)')
     }
     
     if (webSearchContent) {
@@ -1067,6 +1220,19 @@ async function* handleLocalAction(
       }
       
       systemPromptText += `\n\n⚠️ IMPORTANT: You have already called "${loopedToolName}" ${consecutiveCount} times and received its results. Do NOT attempt to call it again or any other tool. You MUST now answer the user's original question using the data below. Provide a clear, concise summary.\n\nData from ${loopedToolName}:\n${toolResultPreview}`
+      
+      // Capture force-answer decision
+      if (isDecisionCaptureEnabled()) {
+        captureForceAnswer({
+          userQuery: fullUserQuery.substring(0, 500),
+          loopedTool: loopedToolName,
+          loopCount: consecutiveCount,
+          hadSearchResults: toolResultPreview.length > 100,
+          context: {
+            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+          },
+        }).catch(() => {})
+      }
     }
 
     // Stream from local model
@@ -1166,7 +1332,7 @@ async function* handleLocalAction(
     routerLog(`[STREAM] Yielding final AssistantMessage`, 'success')
     yield createAssistantMessage(accumulatedContent, decision.model, usage, {
       routingDecision: decision.action as 'local' | 'reason' | 'escalate',
-      routingConfidence: decision.confidence,
+      routingConfidence: decision.confidence || 0.7,
       latencyMs: Date.now() - localStartTime,
     })
     recordLocalCall(usage.inputTokens + usage.outputTokens)
@@ -1238,46 +1404,55 @@ async function* handleLocalAction(
         ).catch(e => routerLog(`Research capture error: ${e}`, 'error'))
       }
 
-      if (loopedToolName && finalText.length > 50) {
+      // Only capture training data on the answer turn (no tool calls this turn)
+      // On tool-calling turns, toolUses > 0 and finalText is just the tool call XML
+      // IMPORTANT: await captures so they complete before the process exits (esp. in -p mode)
+      if (toolUses.length > 0) {
+        routerLog(`[CAPTURE] Skipping capture: tool-calling turn (toolUses=${toolUses.length})`)
+      } else if (loopedToolName && finalText.length > 50) {
         // Tool loop recovery: model was stuck, now answered - capture as DPO + positive
-        captureToolLoopRecovery({
-          userQuery: fullUserQuery,
-          systemPrompt: systemPromptText.substring(0, 3000),
-          loopedToolName,
-          toolCallCount: consecutiveCount,
-          toolResult: toolResultPreview,
-          finalAnswer: finalText,
-          context: {
-            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
-            model: decision.model,
-            routingDecision: decision.action,
-            routingConfidence: decision.confidence ?? 0.7,
-            routingReason: decision.reason,
-            suggestedTool: decision.suggestedTool,
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            latencyMs: Date.now() - localStartTime,
-          },
-        }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
+        try {
+          await captureToolLoopRecovery({
+            userQuery: fullUserQuery,
+            systemPrompt: systemPromptText.substring(0, 3000),
+            loopedToolName,
+            toolCallCount: consecutiveCount,
+            toolResult: toolResultPreview,
+            finalAnswer: finalText,
+            context: {
+              sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+              model: decision.model,
+              routingDecision: decision.action,
+              routingConfidence: decision.confidence || 0.7,
+              routingReason: decision.reason,
+              suggestedTool: decision.suggestedTool,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              latencyMs: Date.now() - localStartTime,
+            },
+          })
+        } catch (e) { routerLog(`Training capture error: ${e}`, 'error') }
       } else if (historyToolCalls.length > 0 && finalText.length > 50) {
         // Successful tool use: capture as positive example
-        captureSuccessfulToolUse({
-          userQuery: fullUserQuery,
-          systemPrompt: systemPromptText.substring(0, 3000),
-          toolCalls: historyToolCalls,
-          finalAnswer: finalText,
-          context: {
-            sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
-            model: decision.model,
-            routingDecision: decision.action,
-            routingConfidence: decision.confidence ?? 0.7,
-            routingReason: decision.reason,
-            suggestedTool: decision.suggestedTool,
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            latencyMs: Date.now() - localStartTime,
-          },
-        }).catch(e => routerLog(`Training capture error: ${e}`, 'error'))
+        try {
+          await captureSuccessfulToolUse({
+            userQuery: fullUserQuery,
+            systemPrompt: systemPromptText.substring(0, 3000),
+            toolCalls: historyToolCalls,
+            finalAnswer: finalText,
+            context: {
+              sessionId: (params.options as any)?.sessionId || `session-${Date.now()}`,
+              model: decision.model,
+              routingDecision: decision.action,
+              routingConfidence: decision.confidence || 0.7,
+              routingReason: decision.reason,
+              suggestedTool: decision.suggestedTool,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              latencyMs: Date.now() - localStartTime,
+            },
+          })
+        } catch (e) { routerLog(`Training capture error: ${e}`, 'error') }
       }
     }
 
