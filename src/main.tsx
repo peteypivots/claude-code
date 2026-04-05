@@ -2085,6 +2085,24 @@ async function run(): Promise<CommanderCommand> {
       saveAgentSetting(mainThreadAgentDefinition.agentType);
     }
 
+    // Script mode: if agent has a `script` field, run it directly and exit (bypasses LLM entirely)
+    if (mainThreadAgentDefinition?.script) {
+      try {
+        const proc = Bun.spawn(['/bin/bash', '-c', mainThreadAgentDefinition.script], {
+          cwd: process.cwd(),
+          env: process.env, // Inherit PATH and other env vars
+          stdout: 'inherit',
+          stderr: 'inherit',
+          stdin: 'ignore',
+        });
+        const exitCode = await proc.exited;
+        process.exit(exitCode);
+      } catch (err) {
+        process.stderr.write(chalk.red(`Script execution failed: ${err}\n`));
+        process.exit(1);
+      }
+    }
+
     // Apply the agent's system prompt for non-interactive sessions
     // (interactive mode uses buildEffectiveSystemPrompt instead)
     if (isNonInteractiveSession && mainThreadAgentDefinition && !systemPrompt && !isBuiltInAgent(mainThreadAgentDefinition)) {

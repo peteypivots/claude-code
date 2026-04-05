@@ -89,6 +89,7 @@ const AgentJsonSchema = lazySchema(() =>
     maxTurns: z.number().int().positive().optional(),
     skills: z.array(z.string()).optional(),
     initialPrompt: z.string().optional(),
+    script: z.string().optional(), // Shell command to run directly (bypasses LLM)
     memory: z.enum(['user', 'project', 'local']).optional(),
     background: z.boolean().optional(),
     isolation: (process.env.USER_TYPE === 'ant'
@@ -122,6 +123,7 @@ export type BaseAgentDefinition = {
   requiredMcpServers?: string[] // MCP server name patterns that must be configured for agent to be available
   background?: boolean // Always run as background task when spawned
   initialPrompt?: string // Prepended to the first user turn (slash commands work)
+  script?: string // Shell command to run directly (bypasses LLM entirely)
   memory?: AgentMemoryScope // Persistent memory scope
   isolation?: 'worktree' | 'remote' // Run in an isolated git worktree, or remotely in CCR (ant-only)
   pendingSnapshotUpdate?: { snapshotTimestamp: string }
@@ -689,6 +691,13 @@ export function parseAgentFromMarkdown(
         ? initialPromptRaw
         : undefined
 
+    // Parse script field (direct shell command execution, bypasses LLM)
+    const scriptRaw = frontmatter['script']
+    const script =
+      typeof scriptRaw === 'string' && scriptRaw.trim()
+        ? scriptRaw.trim()
+        : undefined
+
     // Parse mcpServers from frontmatter using same Zod validation as JSON agents
     const mcpServersRaw = frontmatter['mcpServers']
     let mcpServers: AgentMcpServerSpec[] | undefined
@@ -719,6 +728,7 @@ export function parseAgentFromMarkdown(
       ...(disallowedTools !== undefined ? { disallowedTools } : {}),
       ...(skills !== undefined ? { skills } : {}),
       ...(initialPrompt !== undefined ? { initialPrompt } : {}),
+      ...(script !== undefined ? { script } : {}),
       ...(mcpServers !== undefined && mcpServers.length > 0
         ? { mcpServers }
         : {}),
