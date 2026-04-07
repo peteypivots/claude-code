@@ -22,7 +22,7 @@ import {
   lancedbListTables,
   lancedbUpdateField,
   type LanceDBRecord,
-} from "./lancedb.js";
+} from "../../src/services/lancedb/index.js";
 import {
   nitterSearchTweets,
   nitterUserTweets,

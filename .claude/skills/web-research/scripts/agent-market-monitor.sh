@@ -25,7 +25,9 @@ INSTANCE="${INSTANCE:-default}"
 LOCKFILE="/tmp/agent-monitor-${INSTANCE}.lock"
 PIDFILE="/tmp/agent-monitor-${INSTANCE}.pid"
 STOPFILE="/tmp/agent-monitor-${INSTANCE}-stop"
-LOG="/tmp/agent-monitor-${INSTANCE}.log"
+LOG_DIR="${AGENT_MONITOR_LOG_DIR:-/data/logs}"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/agent-monitor-${INSTANCE}.log"
 
 # Prevent duplicate instances via flock
 exec 9>"$LOCKFILE"
@@ -34,7 +36,11 @@ if ! flock -n 9; then
   exit 1
 fi
 echo $$ > "$PIDFILE"
-trap 'rm -f "$PIDFILE"' EXIT
+TAIL_PID=""
+touch "$LOG"
+tail -n 0 -F "$LOG" >/proc/1/fd/1 2>/proc/1/fd/2 &
+TAIL_PID=$!
+trap 'rm -f "$PIDFILE"; if [ -n "$TAIL_PID" ]; then kill "$TAIL_PID" 2>/dev/null || true; fi' EXIT
 
 CYCLE_DELAY=${CYCLE_DELAY:-300}  # 5 min between cycles
 QUERY_DELAY=${QUERY_DELAY:-10}   # 10s between queries (let model cool down)
@@ -49,6 +55,9 @@ PARALLEL_WORKERS=${PARALLEL_WORKERS:-1}
 # Orchestrator mode — uses the research-batch-orchestrator agent to spawn
 # proper Claude Code subagents via AgentTool. This is the cleanest approach
 # for parallel research as it uses the native agent spawning mechanism.
+# NOTE: Disabled by default — local Ollama models bypass Agent tool and call
+# MCP tools directly (MCP tools bypass agent tool filtering). Enable only
+# when using Claude/cloud models that properly follow Agent delegation.
 # Set ORCHESTRATOR_MODE=1 to enable. Overrides PARALLEL_WORKERS.
 ORCHESTRATOR_MODE=${ORCHESTRATOR_MODE:-0}
 
@@ -185,15 +194,125 @@ pick_queries() {
 
 RESEARCH_PROMPT="$(cat /app/.claude/prompts/research-system.md)"
 
-# MCP config with meta-ai-mcp for web research
-MCP_CONFIG_FILE="/tmp/meta-ai-mcp-config.json"
+# === Nitter User Promotion ===
+# After each cycle, find tweet authors who appear in >= N different queries
+# and promote them to nitter_users for the crawler to pick up.
+LANCEDB_URL="${LANCEDB_URL:-http://lancedb-api:8000}"
+NITTER_PROMOTE_THRESHOLD=${NITTER_PROMOTE_THRESHOLD:-3}  # min distinct queries
+
+promote_nitter_users() {
+  echo "[$(date)] Promoting nitter users (threshold: ${NITTER_PROMOTE_THRESHOLD} queries)..." >> "$LOG"
+
+  # 1. Get all nitter_posts usernames with query counts
+  local posts
+  posts=$(curl -sf -X POST "${LANCEDB_URL}/dbs/user_dbs/tables/nitter_posts/query" \
+    -H "Content-Type: application/json" \
+    -d '{"limit":5000,"columns":["username","query"]}' 2>/dev/null) || {
+    echo "[$(date)]   Promote: nitter_posts query failed" >> "$LOG"
+    return
+  }
+
+  # Count distinct queries per username
+  local candidates
+  candidates=$(echo "$posts" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    records = data.get('records', [])
+    if not records:
+        sys.exit(0)
+    # Count distinct queries per username
+    user_queries = {}
+    for r in records:
+        u = r.get('username', '').strip().lower()
+        q = r.get('query', '')
+        if u and q:
+            user_queries.setdefault(u, set()).add(q)
+    # Filter by threshold
+    threshold = int(sys.argv[1])
+    for u, qs in sorted(user_queries.items(), key=lambda x: -len(x[1])):
+        if len(qs) >= threshold:
+            print(f'{u}\t{len(qs)}')
+except Exception:
+    pass
+" "$NITTER_PROMOTE_THRESHOLD" 2>/dev/null)
+
+  if [ -z "$candidates" ]; then
+    echo "[$(date)]   Promote: no candidates above threshold" >> "$LOG"
+    return
+  fi
+
+  # 2. Get existing nitter_users to avoid duplicates
+  local existing
+  existing=$(curl -sf -X POST "${LANCEDB_URL}/dbs/user_dbs/tables/nitter_users/query" \
+    -H "Content-Type: application/json" \
+    -d '{"limit":10000,"columns":["username"]}' 2>/dev/null \
+    | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    for r in data.get('records', []):
+        print(r.get('username','').strip().lower())
+except Exception:
+    pass
+" 2>/dev/null) || true
+
+  # 3. Seed new users
+  local promoted=0
+  local skipped=0
+  while IFS=$'\t' read -r username query_count; do
+    # Skip if already tracked
+    if echo "$existing" | grep -qx "$username"; then
+      ((skipped++))
+      continue
+    fi
+
+    # Insert into nitter_users
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local payload
+    payload=$(jq -n \
+      --arg u "$username" \
+      --arg t "$now" \
+      --argjson qc "$query_count" \
+      '{
+        username: $u,
+        display_name: $u,
+        bio: ("Auto-promoted: appeared in " + ($qc|tostring) + " distinct research queries"),
+        follower_estimate: 0,
+        priority: 5,
+        source: "market-monitor-promotion",
+        discovered_at: $t,
+        last_crawled: null
+      }')
+
+    curl -sf -X POST "${LANCEDB_URL}/dbs/user_dbs/tables/nitter_users/ingest" \
+      -H "Content-Type: application/json" \
+      -d "{\"records\": [$payload]}" >/dev/null 2>&1 && {
+      ((promoted++))
+      echo "[$(date)]   Promoted @${username} (${query_count} queries)" >> "$LOG"
+    } || {
+      echo "[$(date)]   Failed to promote @${username}" >> "$LOG"
+    }
+  done <<< "$candidates"
+
+  echo "[$(date)]   Promotion complete: $promoted new, $skipped already tracked" >> "$LOG"
+}
+
+# MCP config with meta-ai-mcp AND nitter for multi-tool research
+MCP_CONFIG_FILE="/tmp/research-mcp-config.json"
 META_AI_MCP_URL="${META_AI_MCP_URL:-http://meta-ai-mcp:8099}"
+NITTER_MCP_URL="${NITTER_MCP_URL:-http://nitter-mcp:8085}"
 cat > "$MCP_CONFIG_FILE" <<MCPEOF
 {
   "mcpServers": {
     "meta-ai-mcp": {
       "type": "http",
       "url": "${META_AI_MCP_URL}/"
+    },
+    "nitter": {
+      "type": "http",
+      "url": "${NITTER_MCP_URL}/"
     }
   }
 }
@@ -326,19 +445,23 @@ Output ONLY the queries, one per line. No numbering, no explanation."
 run_agent_query() {
   local query="$1"
 
-  # Simple prompt: just ask Meta AI about the topic and return the answer
-  # The bash script handles storage — the model doesn't need to run pipeline scripts
-  local prompt="Use the meta_ai_chat tool to research: \"${query}\"
+  # Multi-tool prompt: research the topic using all available tools
+  local prompt="Research this topic comprehensively: \"${query}\"
 
-Return the full Meta AI response as your answer. Do NOT call any other tools. Do NOT try to store results. Just call meta_ai_chat and return what it says."
+You MUST call ALL THREE tools in this order:
+1. meta_ai_chat — ask for deep analysis of the topic
+2. nitter_search_tweets — search for social sentiment (use 2-4 keyword query, limit=10)
+3. WebSearch — search for corroborating news and data
+
+After all 3 tool results, synthesize your findings noting consensus, contradictions, and confidence levels.
+Storage is automatic — do NOT try to store results manually."
 
   echo "[$(date)] Agent query: $query" >> "$LOG"
 
   local result
-  result=$(LOCAL_SYSTEM_PROMPT="You are a research assistant. Call the meta_ai_chat tool with the user's query, then return the response verbatim. Do not call Bash or any other tool." \
+  result=$(LOCAL_SYSTEM_PROMPT="You are a multi-source research agent. For every topic, you MUST call meta_ai_chat for analysis, nitter_search_tweets for social sentiment, and WebSearch for web corroboration. After all 3 tools return, synthesize with confidence levels. Never stop after just one tool." \
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
-    timeout 120 bun /app/cli.mjs \
-      --tools "" \
+    timeout 180 bun /app/cli.mjs \
       --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
@@ -380,19 +503,18 @@ run_worker_query() {
   local worker_id="$2"
   local result_file="$3"
 
-  # Simple prompt — model just calls meta_ai_chat, bash handles storage
-  local prompt="Use the meta_ai_chat tool to research: \"${query}\"
+  # Multi-tool prompt — model calls meta_ai + nitter + WebSearch
+  local prompt="Research this topic comprehensively: \"${query}\"
 
-Return the full Meta AI response as your answer. Do NOT call any other tools."
+Call ALL THREE tools: meta_ai_chat (analysis), nitter_search_tweets (sentiment, limit=10), WebSearch (corroboration). Then synthesize."
 
   local start_ms
   start_ms=$(date +%s%3N)
 
   local result
-  result=$(LOCAL_SYSTEM_PROMPT="You are a research assistant. Call the meta_ai_chat tool with the user's query, then return the response verbatim. Do not call Bash or any other tool." \
+  result=$(LOCAL_SYSTEM_PROMPT="You are a multi-source research agent. Call meta_ai_chat, nitter_search_tweets, and WebSearch for every topic. Synthesize after all tools return." \
     LOCAL_MODEL="${LOCAL_MODEL:-qwen2.5:14b-instruct}" \
-    timeout 120 bun /app/cli.mjs \
-      --tools "" \
+    timeout 180 bun /app/cli.mjs \
       --mcp-config "$MCP_CONFIG_FILE" \
       --dangerously-skip-permissions \
       --output-format json \
@@ -603,6 +725,9 @@ while true; do
       sleep "$QUERY_DELAY"
     done
   fi
+
+  # Promote frequent tweet authors to nitter_users for crawler pickup
+  promote_nitter_users
 
   echo "[$(date)] Cycle $cycle complete. Sleeping ${CYCLE_DELAY}s..." >> "$LOG"
   sleep "$CYCLE_DELAY"

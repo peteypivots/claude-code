@@ -352,6 +352,10 @@ import { initializeGrowthBook } from '../services/analytics/growthbook.js'
 import { errorMessage, toError } from '../utils/errors.js'
 import { sleep } from '../utils/sleep.js'
 import { isExtractModeActive } from '../memdir/paths.js'
+import { findRelevantMemories } from '../memdir/findRelevantMemories.js'
+import { getAutoMemPath, isAutoMemoryEnabled } from '../memdir/paths.js'
+import { readFile } from 'fs/promises'
+import { appendFileSync } from 'fs'
 
 // Dead code elimination: conditional imports
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -412,6 +416,67 @@ function trackReceivedMessageUuid(uuid: UUID): boolean {
     }
   }
   return true // new UUID
+}
+
+// ── Memory injection for headless mode ──────────────────────────────────────
+const ROUTER_DEBUG_LOG = process.env.ROUTER_DEBUG_LOG ?? '/data/logs/router-debug.log'
+function memoryLog(msg: string) {
+  const ts = new Date().toISOString()
+  try {
+    appendFileSync(ROUTER_DEBUG_LOG, `${ts} [Memory-Headless] ${msg}\n`)
+  } catch { /* ignore */ }
+}
+
+/**
+ * Fetch relevant memories for headless/SDK mode and format as an injection string.
+ * Returns null if no memories are selected or if memory is disabled.
+ */
+async function fetchRelevantMemoriesForHeadless(
+  query: string,
+  signal: AbortSignal,
+): Promise<string | null> {
+  if (!isAutoMemoryEnabled()) {
+    memoryLog('SKIP: auto-memory disabled')
+    return null
+  }
+
+  const memoryDir = getAutoMemPath()
+  memoryLog(`FETCH: query="${query.slice(0, 50)}...", dir=${memoryDir}`)
+
+  try {
+    const startTime = Date.now()
+    const memories = await findRelevantMemories(query, memoryDir, signal)
+    const latencyMs = Date.now() - startTime
+
+    if (memories.length === 0) {
+      memoryLog(`RESULT: no memories selected (${latencyMs}ms)`)
+      return null
+    }
+
+    // Read memory contents and format as injection
+    const memoryContents: string[] = []
+    for (const mem of memories.slice(0, 5)) {
+      try {
+        const content = await readFile(mem.path, 'utf-8')
+        const filename = mem.path.split('/').pop() ?? mem.path
+        memoryContents.push(`<memory file="${filename}">\n${content.trim()}\n</memory>`)
+      } catch {
+        // Skip unreadable files
+      }
+    }
+
+    if (memoryContents.length === 0) {
+      memoryLog(`RESULT: memories selected but unreadable (${latencyMs}ms)`)
+      return null
+    }
+
+    const injection = `<relevant-memories>\nThe following memories may be relevant to your query:\n\n${memoryContents.join('\n\n')}\n</relevant-memories>`
+    memoryLog(`RESULT: injected ${memoryContents.length} memories (${latencyMs}ms)`)
+    return injection
+  } catch (e) {
+    memoryLog(`ERROR: ${errorMessage(e)}`)
+    return null
+  }
 }
 
 type PromptValue = string | ContentBlockParam[]
@@ -860,6 +925,11 @@ export async function runHeadless(
       ? createStreamlinedTransformer()
       : null
 
+  // Initialize memory extraction for headless mode (like startBackgroundHousekeeping does for interactive)
+  if (feature('EXTRACT_MEMORIES') && isExtractModeActive()) {
+    extractMemoriesModule!.initExtractMemories()
+  }
+
   headlessProfilerCheckpoint('before_runHeadlessStreaming')
   for await (const message of runHeadlessStreaming(
     structuredIO,
@@ -1014,6 +1084,7 @@ function runHeadlessStreaming(
     | 'finally_flush'
     | 'finally_post_flush'
     | undefined
+  appendFileSync('/data/logs/router-debug.log', `[DEBUG-ENTRY] runHeadlessStreaming ENTERED at ${new Date().toISOString()}\n`)
   let inputClosed = false
   let shutdownPromptInjected = false
   let heldBackResult: StdoutMessage | null = null
@@ -1863,6 +1934,8 @@ function runHeadlessStreaming(
   })
 
   const run = async () => {
+    appendFileSync('/data/logs/router-debug.log', `[DEBUG-RUN] run() called: running=${running} at ${new Date().toISOString()}\n`)
+    memoryLog(`RUN_START: running=${running}`)
     if (running) {
       return
     }
@@ -2094,6 +2167,7 @@ function runHeadlessStreaming(
           }
 
           const input = command.value
+          memoryLog(`COMMAND: mode=${command.mode}, inputLen=${typeof input === 'string' ? input.length : 'N/A'}`)
 
           if (structuredIO instanceof RemoteIO && command.mode === 'prompt') {
             logEvent('tengu_bridge_message_received', {
@@ -2143,13 +2217,30 @@ function runHeadlessStreaming(
           // const-capture: TS loses `while ((command = dequeue()))` narrowing
           // inside the closure.
           const cmd = command
+
+          // ── Memory injection for headless mode ────────────────────────────
+          // Fetch relevant memories and prepend to prompt (skip meta/tick prompts)
+          let promptWithMemories = input
+          if (!cmd.isMeta && typeof input === 'string') {
+            memoryLog(`TRIGGER: isMeta=${cmd.isMeta}, inputType=${typeof input}, mutableMessages=${mutableMessages.length}`)
+            const memoryInjection = await fetchRelevantMemoriesForHeadless(
+              input,
+              abortController.signal,
+            )
+            if (memoryInjection) {
+              promptWithMemories = `${memoryInjection}\n\n${input}`
+            }
+          } else {
+            memoryLog(`SKIP-CONDITION: isMeta=${cmd.isMeta}, inputType=${typeof input}`)
+          }
+
           await runWithWorkload(cmd.workload ?? options.workload, async () => {
             for await (const message of ask({
               commands: uniqBy(
                 [...currentCommands, ...appState.mcp.commands],
                 'name',
               ),
-              prompt: input,
+              prompt: promptWithMemories,
               promptUuid: cmd.uuid,
               isMeta: cmd.isMeta,
               cwd: cwd(),

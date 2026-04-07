@@ -6,6 +6,14 @@
       "env": {
         "CLAUDE_CODE_SRC_ROOT": "./src"
       }
+    },
+    "meta-ai-mcp": {
+      "type": "http",
+      "url": "http://meta-ai-mcp:8099/"
+    },
+    "nitter": {
+      "type": "http",
+      "url": "http://nitter-mcp:8085/"
     }
   }
 }

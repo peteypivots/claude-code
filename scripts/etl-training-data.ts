@@ -222,17 +222,92 @@ async function batchIngest(table: string, records: Record<string, unknown>[]): P
 // Skip per-record hash check — use in-memory dedup instead
 // LanceDB rate limits make per-record queries impractical
 
-// ── Quality Score ─────────────────────────────────────────
+// ── Routing Decision Validation ───────────────────────────
+function validateRoutingDecision(raw?: string | unknown): string {
+  const validDecisions = ['local', 'reason', 'escalate', 'external', 'unknown']
+  if (typeof raw !== 'string') return 'unknown'
+  if (raw.length > 20) return 'unknown' // schema dump detection
+  const normalized = raw.toLowerCase().trim()
+  return validDecisions.includes(normalized) ? normalized : 'unknown'
+}
+
+// ── Answer Quality Heuristic ──────────────────────────────
+/**
+ * Check if this is a direct/short correct answer (e.g., "4" for "2+2?")
+ */
+function isDirectAnswer(userQuery: string, answer: string): boolean {
+  if (userQuery.length < 100 && answer.length < 200) {
+    if (/\d.*[+\-*/].*\d|what is|calculate|compute/i.test(userQuery)) return true
+    if (/^(what|who|where|when|how many|how much)\b/i.test(userQuery) && answer.length < 100) return true
+  }
+  return false
+}
+
+/**
+ * Compute answer quality (0-1) based on heuristics
+ */
+function computeAnswerQuality(turn: Turn): number {
+  const userQuery = turn.user
+  const finalAnswer = turn.assistant
+
+  if (!finalAnswer || finalAnswer.length < 10) return 0.1
+
+  let score = 0.5 // baseline
+
+  // Direct/short correct answers get high score
+  if (isDirectAnswer(userQuery, finalAnswer)) {
+    score = 0.9
+  } else {
+    // Length heuristic
+    if (finalAnswer.length >= 50 && finalAnswer.length <= 3000) {
+      score += 0.1
+    } else if (finalAnswer.length > 3000) {
+      score -= 0.1
+    }
+
+    // Query-answer relevance
+    const queryWords = new Set(userQuery.toLowerCase().match(/\b\w{4,}\b/g) || [])
+    const answerWords = new Set(finalAnswer.toLowerCase().match(/\b\w{4,}\b/g) || [])
+    const overlap = [...queryWords].filter(w => answerWords.has(w)).length
+    if (overlap >= 2) score += 0.15
+
+    // Tool usage check: did answer incorporate tool results?
+    if (turn.toolCalls.length > 0) {
+      const successfulTools = turn.toolCalls.filter(t => t.outcome === 'success')
+      if (successfulTools.length > 0) {
+        const anyUsed = successfulTools.some(t => wasToolUsedInAnswer(t.result, finalAnswer))
+        if (anyUsed) {
+          score += 0.2
+        } else {
+          score -= 0.1
+        }
+      }
+    }
+  }
+
+  return Math.max(0.1, Math.min(1.0, score))
+}
+
+// ── Quality Score (Rebalanced) ────────────────────────────
+/**
+ * Compute overall quality score:
+ * - 20% routing confidence
+ * - 20% tool success rate  
+ * - 20% user feedback
+ * - 40% answer quality (the actual output)
+ */
 function computeQualityScore(turn: Turn): number {
   const routingConf = turn.metadata.routingConfidence ?? 0.5
   const toolSuccess = turn.toolCalls.length > 0
     ? turn.toolCalls.filter(t => t.outcome === 'success').length / turn.toolCalls.length
-    : 1.0 // no tools = neutral
+    : 0.7 // no tools = neutral (not 1.0!)
   const feedbackScore = turn.metadata.feedback === 'up' ? 1.0
     : turn.metadata.feedback === 'down' ? 0.0
     : 0.5
+  const answerQuality = computeAnswerQuality(turn)
 
-  return 0.4 * routingConf + 0.3 * toolSuccess + 0.3 * feedbackScore
+  // Rebalanced: give answer quality the most weight
+  return 0.20 * routingConf + 0.20 * toolSuccess + 0.20 * feedbackScore + 0.40 * answerQuality
 }
 
 // ── Auto-tag ──────────────────────────────────────────────
@@ -523,11 +598,12 @@ async function main() {
         assistant_content: turn.assistant.substring(0, 10000),
         canonical_prompt: canonical.substring(0, 1000),
         model_used: turn.metadata.modelUsed || 'unknown',
-        routing_decision: turn.metadata.routingDecision || 'unknown',
+        routing_decision: validateRoutingDecision(turn.metadata.routingDecision),
         routing_confidence: turn.metadata.routingConfidence ?? 0.5,
         latency_ms: turn.metadata.latencyMs ?? 0,
         feedback: turn.metadata.feedback || 'null',
         quality_score: qualityScore,
+        answer_quality: computeAnswerQuality(turn),
         tags: tags.join(','),
         content_hash: hash,
         turn_index: turn.metadata.turnIndex,

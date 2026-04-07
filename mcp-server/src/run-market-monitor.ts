@@ -39,6 +39,7 @@ import {
   getCaptureStats,
   isCaptureEnabled,
 } from '../../src/services/llm/trainingCapture.js'
+import { QueryDedup, type DedupCheckResult } from './query-dedup.js'
 
 // ── CLI Args ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,8 @@ const MAX_CYCLES = parseInt(getArg('cycles', '0'), 10) // 0 = infinite
 const CYCLE_DELAY_SEC = parseInt(getArg('delay', process.env.CYCLE_DELAY ?? '300'), 10)
 const QUERIES_PER_CYCLE = parseInt(getArg('queries', process.env.QUERIES_PER_CYCLE ?? '8'), 10)
 const GROK_ENABLED = (process.env.GROK_REPHRASE_ENABLED ?? 'true') === 'true'
+const QUERY_DEDUP_ENABLED = (process.env.QUERY_DEDUP_ENABLED ?? 'true') === 'true'
+const QUERY_DEDUP_THRESHOLD = parseFloat(process.env.QUERY_DEDUP_THRESHOLD ?? '0.35')
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 
@@ -73,6 +76,9 @@ interface CycleStats {
   grokRateLimited: number
   startTime: number
   endTime?: number
+  // Query dedup stats
+  queryDedupSkipped: number
+  queryDedupRecorded: number
 }
 
 interface DupeQueue {
@@ -279,6 +285,9 @@ function getCachedAlternative(query: string): string | undefined {
 
 // ── Cycle Execution ───────────────────────────────────────────────────────────
 
+// Global dedup instance (initialized in main)
+let queryDedup: QueryDedup | null = null
+
 async function runCycle(cycleNum: number): Promise<CycleStats> {
   const stats: CycleStats = {
     cycle: cycleNum,
@@ -289,13 +298,31 @@ async function runCycle(cycleNum: number): Promise<CycleStats> {
     grokCalls: 0,
     grokRateLimited: 0,
     startTime: Date.now(),
+    queryDedupSkipped: 0,
+    queryDedupRecorded: 0,
   }
 
   log(`═══ Cycle ${cycleNum} starting ═══`)
 
   // Pick queries for this cycle
-  const queries = pickQueries(QUERIES_PER_CYCLE)
-  log(`Running ${queries.length} queries`)
+  let queries = pickQueries(QUERIES_PER_CYCLE)
+  log(`Selected ${queries.length} queries`)
+
+  // Filter out duplicate queries via vector dedup
+  if (QUERY_DEDUP_ENABLED && queryDedup) {
+    const dedupResult = await queryDedup.filterNovel(queries)
+    stats.queryDedupSkipped = dedupResult.duplicates.length
+    
+    if (dedupResult.duplicates.length > 0) {
+      log(`Query dedup: ${dedupResult.duplicates.length} similar to recent queries:`)
+      for (const d of dedupResult.duplicates) {
+        log(`  - "${d.query.substring(0, 40)}..." ≈ "${d.similarTo.substring(0, 30)}..." (d=${d.distance.toFixed(3)})`)
+      }
+    }
+    
+    queries = dedupResult.novel
+    log(`Running ${queries.length} novel queries (${stats.queryDedupSkipped} skipped)`)
+  }
 
   // Execute each query
   for (const query of queries) {
@@ -318,6 +345,12 @@ async function runCycle(cycleNum: number): Promise<CycleStats> {
       log(`  Query failed: ${result.error}`, 'error')
     } else {
       log(`  ${query.substring(0, 40)}... → stored=${result.stored}, dupes=${result.duplicates}`)
+      
+      // Record successful query in dedup index
+      if (QUERY_DEDUP_ENABLED && queryDedup && result.stored > 0) {
+        await queryDedup.record(query, { resultCount: result.stored })
+        stats.queryDedupRecorded++
+      }
     }
 
     // Queue for Grok if too many duplicates and no cached alternative
@@ -342,6 +375,7 @@ async function runCycle(cycleNum: number): Promise<CycleStats> {
   log(`═══ Cycle ${cycleNum} complete ═══`)
   log(`  Duration: ${durationSec}s`)
   log(`  Queries: ${stats.queriesRun}, Stored: ${stats.stored}, Dupes: ${stats.duplicates}`)
+  log(`  Query dedup: skipped=${stats.queryDedupSkipped}, recorded=${stats.queryDedupRecorded}`)
   log(`  Grok: calls=${stats.grokCalls}, rateLimited=${stats.grokRateLimited}`)
 
   if (isCaptureEnabled()) {
@@ -361,8 +395,20 @@ async function main(): Promise<void> {
   log(`  Delay: ${CYCLE_DELAY_SEC}s between cycles`)
   log(`  Queries/cycle: ${QUERIES_PER_CYCLE}`)
   log(`  Grok enabled: ${GROK_ENABLED}`)
+  log(`  Query dedup: ${QUERY_DEDUP_ENABLED} (threshold=${QUERY_DEDUP_THRESHOLD})`)
   log(`  Training capture: ${isCaptureEnabled()}`)
   log('════════════════════════════════════════════════════════════')
+
+  // Initialize query dedup
+  if (QUERY_DEDUP_ENABLED) {
+    queryDedup = new QueryDedup({
+      similarityThreshold: QUERY_DEDUP_THRESHOLD,
+      ttlHours: 24,
+      verbose: process.env.QUERY_DEDUP_VERBOSE === 'true',
+    })
+    await queryDedup.init()
+    log(`Query dedup initialized`)
+  }
 
   let cycle = 1
   
@@ -376,6 +422,11 @@ async function main(): Promise<void> {
     log(`Sleeping ${CYCLE_DELAY_SEC}s until next cycle...`)
     await new Promise(r => setTimeout(r, CYCLE_DELAY_SEC * 1000))
     cycle++
+  }
+
+  // Log final dedup stats
+  if (queryDedup) {
+    log(`Query dedup final stats: ${JSON.stringify(queryDedup.getStats())}`)
   }
 
   log('Market Monitor finished.')

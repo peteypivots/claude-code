@@ -67,6 +67,11 @@ export function isAutoMemoryEnabled(): boolean {
  * directly in an `if` condition.
  */
 export function isExtractModeActive(): boolean {
+  // Local-first mode: enable extraction unconditionally (including -p mode)
+  // since GrowthBook feature flags aren't available in local deployments.
+  if (process.env.LOCAL_FIRST === 'true') {
+    return true
+  }
   if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_passport_quail', false)) {
     return false
   }

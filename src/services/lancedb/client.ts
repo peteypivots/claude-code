@@ -1,6 +1,11 @@
 /**
  * LanceDB REST API client
  *
+ * Shared client for vector database operations. Used by:
+ * - query-dedup.ts (query deduplication)
+ * - vectorMemorySelector.ts (memory file selection)
+ * - crawler.ts (nitter social graph storage)
+ *
  * Environment:
  *   LANCEDB_URI - REST API base URL (default: http://lancedb-api:8000)
  *   LANCEDB_DB  - Database name (default: user_dbs)
@@ -8,6 +13,12 @@
 
 const LANCEDB_URI = process.env.LANCEDB_URI ?? "http://lancedb-api:8000";
 const LANCEDB_DB = process.env.LANCEDB_DB ?? "user_dbs";
+
+// Default timeouts (ms)
+const DEFAULT_QUERY_TIMEOUT = 5000;
+const DEFAULT_SEARCH_TIMEOUT = 5000;
+const DEFAULT_INGEST_TIMEOUT = 30000;
+const DEFAULT_DELETE_TIMEOUT = 10000;
 
 export interface LanceDBRecord {
   id: string;
@@ -20,7 +31,7 @@ export interface QueryResult {
 }
 
 export interface SearchResult {
-  results: LanceDBRecord[];
+  results: Array<LanceDBRecord & { _distance?: number }>;
   error?: string;
 }
 
@@ -30,13 +41,18 @@ export interface TableInfo {
   columns: { name: string; type: string }[];
 }
 
+export interface LanceDBOptions {
+  timeout?: number;
+}
+
 /**
  * Query table with optional filter
  */
 export async function lancedbQuery(
   table: string,
   filter?: string,
-  limit = 100
+  limit = 100,
+  options?: LanceDBOptions
 ): Promise<QueryResult> {
   const url = `${LANCEDB_URI}/dbs/${LANCEDB_DB}/tables/${table}/query`;
   const payload: Record<string, unknown> = { limit };
@@ -47,6 +63,7 @@ export async function lancedbQuery(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(options?.timeout ?? DEFAULT_QUERY_TIMEOUT),
     });
 
     if (!resp.ok) {
@@ -54,7 +71,7 @@ export async function lancedbQuery(
       return { records: [], error: text };
     }
 
-    const data = await resp.json();
+    const data = (await resp.json()) as { records?: LanceDBRecord[] };
     return { records: data.records ?? [] };
   } catch (err) {
     return { records: [], error: String(err) };
@@ -67,7 +84,8 @@ export async function lancedbQuery(
 export async function lancedbSearch(
   table: string,
   vector: number[],
-  limit = 10
+  limit = 10,
+  options?: LanceDBOptions
 ): Promise<SearchResult> {
   const url = `${LANCEDB_URI}/dbs/${LANCEDB_DB}/tables/${table}/search`;
 
@@ -76,6 +94,7 @@ export async function lancedbSearch(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query_vector: vector, limit }),
+      signal: AbortSignal.timeout(options?.timeout ?? DEFAULT_SEARCH_TIMEOUT),
     });
 
     if (!resp.ok) {
@@ -83,7 +102,7 @@ export async function lancedbSearch(
       return { results: [], error: text };
     }
 
-    const data = await resp.json();
+    const data = (await resp.json()) as { results?: Array<LanceDBRecord & { _distance?: number }> };
     return { results: data.results ?? [] };
   } catch (err) {
     return { results: [], error: String(err) };
@@ -95,7 +114,8 @@ export async function lancedbSearch(
  */
 export async function lancedbIngest(
   table: string,
-  records: LanceDBRecord[]
+  records: LanceDBRecord[],
+  options?: LanceDBOptions
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${LANCEDB_URI}/dbs/${LANCEDB_DB}/tables/${table}/ingest`;
 
@@ -104,6 +124,7 @@ export async function lancedbIngest(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ records }),
+      signal: AbortSignal.timeout(options?.timeout ?? DEFAULT_INGEST_TIMEOUT),
     });
 
     if (!resp.ok) {
@@ -122,7 +143,8 @@ export async function lancedbIngest(
  */
 export async function lancedbDelete(
   table: string,
-  filter: string
+  filter: string,
+  options?: LanceDBOptions
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${LANCEDB_URI}/dbs/${LANCEDB_DB}/tables/${table}/delete`;
 
@@ -131,6 +153,7 @@ export async function lancedbDelete(
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filter }),
+      signal: AbortSignal.timeout(options?.timeout ?? DEFAULT_DELETE_TIMEOUT),
     });
 
     if (!resp.ok) {
@@ -147,14 +170,16 @@ export async function lancedbDelete(
 /**
  * List all tables with metadata
  */
-export async function lancedbListTables(): Promise<TableInfo[]> {
+export async function lancedbListTables(options?: LanceDBOptions): Promise<TableInfo[]> {
   const url = `${LANCEDB_URI}/dbs/${LANCEDB_DB}/tables`;
 
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(options?.timeout ?? DEFAULT_QUERY_TIMEOUT),
+    });
     if (!resp.ok) return [];
 
-    const data = await resp.json();
+    const data = (await resp.json()) as { tables?: TableInfo[] };
     return data.tables ?? [];
   } catch {
     return [];
@@ -187,4 +212,25 @@ export async function lancedbUpdateField(
   // Insert updated record
   const result = await lancedbIngest(table, [record as LanceDBRecord]);
   return result.success;
+}
+
+/**
+ * Check if LanceDB is available
+ */
+export async function lancedbHealthCheck(): Promise<boolean> {
+  try {
+    const resp = await fetch(`${LANCEDB_URI}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get current configuration
+ */
+export function getLanceDBConfig(): { uri: string; db: string } {
+  return { uri: LANCEDB_URI, db: LANCEDB_DB };
 }

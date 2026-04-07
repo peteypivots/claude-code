@@ -13,6 +13,7 @@ import { captureToolLoopRecovery, captureSuccessfulToolUse, captureMultiTurn, is
 import { captureResearchFindings, isResearchCaptureEnabled } from './researchCapture.js'
 import { captureRoutingDecision, captureForceAnswer, isDecisionCaptureEnabled } from './decisionCapture.js'
 import { findRelevantResearch, isResearchRecallEnabled, formatResearchForContext } from '../../memdir/findRelevantResearch.js'
+import { getToolRetryWrapper, formatErrorForModel, getToolFallback, type ToolRetryError } from './toolRetry.js'
 
 const ROUTER_LOG = process.env.OLLAMA_DEBUG_LOG_FILE || '/data/logs/router-debug.log'
 
@@ -465,7 +466,10 @@ function convertMessagesToLLM(messages: Message[]): LLMRequestOptions['messages'
     if (m.type === 'user') {
       const content = m.message.content
       const hasToolResult = Array.isArray(content) && content.some((c: any) => c.type === 'tool_result')
-      routerLog(`  - user message: hasToolResult=${hasToolResult}, content=${typeof content === 'string' ? content.substring(0, 50) : `array[${content.length}]`}`)
+      const contentSummary = typeof content === 'string'
+        ? `text(len=${content.length})`
+        : `array(len=${content.length})`
+      routerLog(`  - user message: hasToolResult=${hasToolResult}, content=${contentSummary}`)
     } else if (m.type === 'assistant') {
       const hasToolUse = m.message.content.some((c: any) => c.type === 'tool_use')
       routerLog(`  - assistant message: hasToolUse=${hasToolUse}`)
@@ -1306,8 +1310,8 @@ async function* handleLocalAction(
       routerLog(`   🔧 TOOL CALLS: ${toolUses.length}`, 'success')
       for (const c of toolUses) {
         if (c.type === 'tool_use') {
-          const inputPreview = JSON.stringify(c.input).substring(0, 100)
-          routerLog(`      → ${c.name}(${inputPreview}...)`, 'info')
+          const inputLen = JSON.stringify(c.input).length
+          routerLog(`      → ${c.name}(input_len=${inputLen})`, 'info')
         }
       }
     }
@@ -1315,8 +1319,7 @@ async function* handleLocalAction(
     if (textBlocks.length > 0) {
       for (const c of textBlocks) {
         if (c.type === 'text' && c.text) {
-          const preview = c.text.substring(0, 150).replace(/\n/g, ' ')
-          routerLog(`   💬 TEXT: "${preview}${c.text.length > 150 ? '...' : ''}"`, 'info')
+          routerLog(`   💬 TEXT: len=${c.text.length}`, 'info')
         }
       }
     }
@@ -1390,7 +1393,7 @@ async function* handleLocalAction(
         routerLog(`[RESEARCH_CAPTURE] toolResultMap.size=${toolResultMap.size}`)
         for (const [id, content] of toolResultMap) {
           const toolName = historyToolCalls.find(t => t.result === content)?.name || 'unknown'
-          routerLog(`[RESEARCH_CAPTURE] tool=${toolName}, id=${id}, contentLen=${content.length}, preview=${content.substring(0, 200).replace(/\n/g, '\\n')}`)
+          routerLog(`[RESEARCH_CAPTURE] tool=${toolName}, id=${id}, contentLen=${content.length}`)
         }
         captureResearchFindings(
           toolResultMap,

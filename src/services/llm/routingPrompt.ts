@@ -51,15 +51,22 @@ Given a user message, you must decide ONE of three actions:
 3. "escalate" - Send to Claude (novel/creative tasks, ambiguous intent, security-sensitive)
 
 OUTPUT FORMAT (JSON only, no markdown):
-{"action":"local|reason|escalate","model":"model-name","reasoning":"brief reason","confidence":0.0-1.0,"suggestedTool":"tool-name or null"}
+{"action":"local|reason|escalate","model":"model-name","reasoning":"brief reason","confidence":0.5-1.0,"suggestedTool":"tool-name or null"}
+
+IMPORTANT RULES:
+- Always set "confidence" to a realistic value between 0.5 and 1.0 reflecting how certain you are. Never use 0.
+- NEVER use "UserInput" as a suggestedTool - that is not a valid tool name.
+- ALWAYS bias toward attempting an answer rather than asking for clarification.
+- If unsure, route to "local" with a reasonable tool suggestion.
 
 ROUTING RULES:
 - Default to "local" — most tasks can be handled locally
 - Use "reason" for: math problems, step-by-step analysis, planning sequences
-- Use "escalate" ONLY for: architecture decisions, security review, creative writing, unclear user intent
+- Use "escalate" ONLY for: architecture decisions, security review, creative writing
 - If the user asks about real-time info (weather, news, prices), route to "local" with suggestedTool "WebSearch" or "WebFetch"
 - If the query clearly requires a tool (file read, web search, shell command), always set suggestedTool
 - If conversation is very long (depth > 25), consider "escalate" for coherence
+- For ambiguous queries, route to "local" with confidence 0.6-0.7 and attempt the task
 
 Be concise. Output only valid JSON.`
 
@@ -266,7 +273,7 @@ export function parseRoutingResponse(output: string): RoutingDecision | null {
     action: action as 'local' | 'reason' | 'escalate',
     model: (parsed.model as string) || getDefaultModel(action as 'local' | 'reason' | 'escalate'),
     reasoning: (parsed.reasoning as string) || 'No reasoning provided',
-    confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
+    confidence: typeof parsed.confidence === 'number' && parsed.confidence > 0 ? parsed.confidence : 0.7,
     suggestedTool,
   }
 }

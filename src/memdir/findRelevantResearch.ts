@@ -221,7 +221,11 @@ export function formatResearchForContext(findings: ResearchFinding[]): string {
 
   const lines: string[] = [
     '<relevant-research>',
-    'The following research findings from previous sessions may be relevant:',
+    'The following research findings from previous sessions may be relevant.',
+    '',
+    'IMPORTANT: Only use this research if it is DIRECTLY relevant to the current query.',
+    'If the research topic does not match what the user is asking about, IGNORE these findings.',
+    'Do NOT mix information from unrelated topics into your response.',
     ''
   ]
 

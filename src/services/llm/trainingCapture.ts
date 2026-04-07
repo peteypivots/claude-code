@@ -142,10 +142,135 @@ async function getEmbedding(text: string): Promise<number[] | null> {
   }
 }
 
-function computeQualityScore(context?: CaptureContext, toolSuccess?: boolean): number {
-  const routingConf = context?.routingConfidence ?? 0.7
+/**
+ * Check if tool output was actually used in final answer (key phrases appear)
+ */
+function wasToolUsedInAnswer(toolOutput: string, finalAnswer: string): boolean {
+  if (!toolOutput || !finalAnswer || toolOutput.length < 20) return false
+  // Extract key phrases (3+ word sequences) from tool output
+  const phrases = toolOutput
+    .substring(0, 1000)
+    .split(/[.!?\n]/)
+    .map(s => s.trim())
+    .filter(s => s.split(/\s+/).length >= 3 && s.length > 15)
+    .slice(0, 5)
+  // Check if any key phrase appears in the final answer
+  return phrases.some(phrase => {
+    const normalized = phrase.toLowerCase().substring(0, 80)
+    return finalAnswer.toLowerCase().includes(normalized)
+  })
+}
+
+/**
+ * Check if this is a direct/short correct answer (e.g., "4" for "2+2?")
+ * These should score high even without tools.
+ */
+function isDirectAnswer(userQuery: string, answer: string): boolean {
+  // Short answers to short questions are likely direct answers
+  if (userQuery.length < 100 && answer.length < 200) {
+    // Check for math-like queries
+    if (/\d.*[+\-*/].*\d|what is|calculate|compute/i.test(userQuery)) {
+      return true
+    }
+    // Factual questions with short answers
+    if (/^(what|who|where|when|how many|how much)\b/i.test(userQuery) && answer.length < 100) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Compute answer quality heuristic:
+ * - Did the answer incorporate tool results? (if tools were used)
+ * - Is the answer relevant to the query? (keyword overlap)
+ * - Is the answer an appropriate length?
+ */
+function computeAnswerQuality(
+  userQuery: string,
+  finalAnswer: string,
+  toolResults?: Array<{ content: string; isError?: boolean }>
+): number {
+  if (!finalAnswer || finalAnswer.length < 10) return 0.1
+
+  let score = 0.5 // baseline
+
+  // Direct/short correct answers get high score
+  if (isDirectAnswer(userQuery, finalAnswer)) {
+    score = 0.9
+  } else {
+    // Length heuristic: too short = incomplete, too long = bloat
+    if (finalAnswer.length >= 50 && finalAnswer.length <= 3000) {
+      score += 0.1
+    } else if (finalAnswer.length > 3000) {
+      score -= 0.1 // penalize bloat
+    }
+
+    // Query-answer relevance: check keyword overlap
+    const queryWords = new Set(userQuery.toLowerCase().match(/\b\w{4,}\b/g) || [])
+    const answerWords = new Set(finalAnswer.toLowerCase().match(/\b\w{4,}\b/g) || [])
+    const overlap = [...queryWords].filter(w => answerWords.has(w)).length
+    if (overlap >= 2) score += 0.15
+
+    // Tool usage check: did answer incorporate tool results?
+    if (toolResults && toolResults.length > 0) {
+      const successfulResults = toolResults.filter(r => !r.isError)
+      if (successfulResults.length > 0) {
+        const anyUsed = successfulResults.some(r => wasToolUsedInAnswer(r.content, finalAnswer))
+        if (anyUsed) {
+          score += 0.2 // reward incorporating tool results
+        } else {
+          score -= 0.1 // penalize ignoring tool results
+        }
+      }
+    }
+  }
+
+  return Math.max(0.1, Math.min(1.0, score))
+}
+
+/**
+ * Validate routing decision - must be one of: local, reason, escalate, external
+ * Returns validated decision or 'unknown' if invalid/corrupted
+ */
+function validateRoutingDecision(raw?: string | unknown): string {
+  const validDecisions = ['local', 'reason', 'escalate', 'external', 'unknown']
+  if (typeof raw !== 'string') return 'unknown'
+  if (raw.length > 20) return 'unknown' // schema dump detection
+  const normalized = raw.toLowerCase().trim()
+  return validDecisions.includes(normalized) ? normalized : 'unknown'
+}
+
+/**
+ * Validate suggested tool - filter out invalid/meta tool names
+ * Returns validated tool name or null if invalid
+ */
+function validateSuggestedTool(raw?: string | null): string | null {
+  if (!raw || typeof raw !== 'string') return null
+  // Invalid/meta tool names that should not be suggested
+  const invalidTools = ['userinput', 'user_input', 'clarify', 'ask', 'question', 'none', 'null']
+  const normalized = raw.toLowerCase().trim()
+  if (invalidTools.includes(normalized)) return null
+  if (raw.length > 50) return null // corrupted/schema dump
+  return raw
+}
+
+/**
+ * Compute overall quality score (rebalanced):
+ * - 25% routing confidence (meta-level)
+ * - 25% tool success rate (execution)
+ * - 50% answer quality (actual output quality)
+ */
+function computeQualityScore(
+  context?: CaptureContext,
+  toolSuccess?: boolean,
+  answerQuality?: number
+): number {
+  const routingConf = context?.routingConfidence || 0.7
   const toolScore = toolSuccess !== undefined ? (toolSuccess ? 1.0 : 0.3) : 0.7
-  return 0.5 * routingConf + 0.5 * toolScore
+  const answerScore = answerQuality ?? 0.5
+  // Rebalanced: 25% routing + 25% tool + 50% answer quality
+  return 0.25 * routingConf + 0.25 * toolScore + 0.50 * answerScore
 }
 
 function autoTag(capture: MultiTurnCapture | DPOCapture): string[] {
@@ -309,9 +434,14 @@ export async function captureMultiTurn(capture: MultiTurnCapture): Promise<strin
   // Build messages array
   const messages = buildMessagesArray(capture)
 
-  // Compute quality score
+  // Compute quality score with answer quality
   const toolSuccess = capture.toolResults.every(r => !r.isError)
-  const qualityScore = computeQualityScore(capture.context, toolSuccess)
+  const answerQuality = computeAnswerQuality(
+    capture.userQuery,
+    capture.finalAnswer,
+    capture.toolResults
+  )
+  const qualityScore = computeQualityScore(capture.context, toolSuccess, answerQuality)
 
   // Generate embedding for retrieval
   const embeddingText = `${capture.userQuery}\n${capture.finalAnswer}`.substring(0, 2000)
@@ -327,15 +457,16 @@ export async function captureMultiTurn(capture: MultiTurnCapture): Promise<strin
     // Store full multi-turn messages in canonical_prompt (v7 format)
     canonical_prompt: JSON.stringify(messages),
     model_used: capture.context?.model || 'unknown',
-    routing_decision: capture.context?.routingDecision || 'local',
-    routing_confidence: capture.context?.routingConfidence ?? 0.7,
+    routing_decision: validateRoutingDecision(capture.context?.routingDecision),
+    routing_confidence: capture.context?.routingConfidence || 0.7,
     routing_reason: capture.context?.routingReason || null,
-    suggested_tool: capture.context?.suggestedTool || null,
+    suggested_tool: validateSuggestedTool(capture.context?.suggestedTool),
     input_tokens: capture.context?.inputTokens ?? 0,
     output_tokens: capture.context?.outputTokens ?? 0,
     latency_ms: capture.context?.latencyMs ?? 0,
     feedback: null,
     quality_score: qualityScore,
+    answer_quality: answerQuality,
     tags: ['v7_multi_turn', ...tags].join(','),
     content_hash: hash,
     turn_index: 0,
@@ -382,10 +513,10 @@ export async function captureDPO(capture: DPOCapture): Promise<string | null> {
     // Store DPO object in canonical_prompt (v7 format)
     canonical_prompt: JSON.stringify(dpo),
     model_used: capture.context?.model || 'unknown',
-    routing_decision: capture.context?.routingDecision || 'local',
-    routing_confidence: capture.context?.routingConfidence ?? 0.5,
+    routing_decision: validateRoutingDecision(capture.context?.routingDecision),
+    routing_confidence: capture.context?.routingConfidence || 0.5,
     routing_reason: capture.context?.routingReason || null,
-    suggested_tool: capture.context?.suggestedTool || null,
+    suggested_tool: validateSuggestedTool(capture.context?.suggestedTool),
     input_tokens: capture.context?.inputTokens ?? 0,
     output_tokens: capture.context?.outputTokens ?? 0,
     latency_ms: capture.context?.latencyMs ?? 0,

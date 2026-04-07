@@ -9,6 +9,10 @@ services:
     labels:
       logging: promtail
       logging_job: claude-code
+      promtail.enabled: "true"
+      promtail.job: claude-code
+      promtail.service: claude-code
+      promtail.environment: local
     
     # Environment & API Key ──────────────────────────────
     environment:

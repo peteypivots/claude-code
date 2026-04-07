@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { appendFileSync } from 'fs'
 import { logForDebugging } from '../utils/debug.js'
 import { errorMessage } from '../utils/errors.js'
 import { getDefaultSonnetModel } from '../utils/model/model.js'
@@ -10,10 +11,29 @@ import {
   type MemoryHeader,
   scanMemoryFiles,
 } from './memoryScan.js'
+import { selectMemoriesVector } from './vectorMemorySelector.js'
+import { captureMemorySelection, isDecisionCaptureEnabled } from '../services/llm/decisionCapture.js'
+
+// Router debug log for agent-level visibility
+const ROUTER_DEBUG_LOG = process.env.ROUTER_DEBUG_LOG ?? '/data/logs/router-debug.log'
+function routerLog(msg: string) {
+  const ts = new Date().toISOString()
+  try {
+    appendFileSync(ROUTER_DEBUG_LOG, `${ts} [Memory] ${msg}\n`)
+  } catch { /* ignore */ }
+}
 
 /** Check if we're in local-first mode (Ollama) */
 function isLocalFirst(): boolean {
   return !!(process.env.OLLAMA_BASE_URL || process.env.LOCAL_FIRST === 'true')
+}
+
+/** Check if vector memory selector should be used (default: true when local-first) */
+function useVectorMemory(): boolean {
+  if (process.env.USE_VECTOR_MEMORY === 'false') return false
+  if (process.env.USE_VECTOR_MEMORY === 'true') return true
+  // Default: enable when local-first mode is active
+  return isLocalFirst()
 }
 
 /**
@@ -70,6 +90,7 @@ export async function findRelevantMemories(
   recentTools: readonly string[] = [],
   alreadySurfaced: ReadonlySet<string> = new Set(),
 ): Promise<RelevantMemory[]> {
+  routerLog(`ENTER findRelevantMemories: dir=${memoryDir}, query="${query.slice(0, 50)}..."`)
   const memories = (await scanMemoryFiles(memoryDir, signal)).filter(
     m => !alreadySurfaced.has(m.filePath),
   )
@@ -80,6 +101,7 @@ export async function findRelevantMemories(
   const selectedFilenames = await selectRelevantMemories(
     query,
     memories,
+    memoryDir,
     signal,
     recentTools,
   )
@@ -104,11 +126,42 @@ export async function findRelevantMemories(
 async function selectRelevantMemories(
   query: string,
   memories: MemoryHeader[],
+  memoryDir: string,
   signal: AbortSignal,
   recentTools: readonly string[],
 ): Promise<string[]> {
   const validFilenames = new Set(memories.map(m => m.filename))
 
+  // ── Vector selector (fast path: ~60ms, 0 tokens) ──────────────────────────
+  if (useVectorMemory()) {
+    try {
+      const vectorResult = await selectMemoriesVector(query, memoryDir)
+      if (vectorResult.selector === 'vector' && vectorResult.memories.length > 0) {
+        const vectorFilenames = vectorResult.memories
+          .map(m => m.filename)
+          .filter(f => validFilenames.has(f))
+        logForDebugging(
+          `[memdir] Vector memory recall selected ${vectorFilenames.length} memories in ${vectorResult.latencyMs}ms (index: ${vectorResult.indexStatus})`,
+        )
+        routerLog(`VECTOR selected ${vectorFilenames.length} memories in ${vectorResult.latencyMs}ms: ${vectorFilenames.slice(0, 3).join(', ')}${vectorFilenames.length > 3 ? '...' : ''}`)
+        return vectorFilenames
+      }
+      // Vector returned empty or fell back — continue to LLM
+      logForDebugging(
+        `[memdir] Vector selector returned ${vectorResult.selector}, falling back to LLM`,
+      )
+      routerLog(`VECTOR fallback: selector=${vectorResult.selector}, memories=${vectorResult.memories.length}`)
+    } catch (e) {
+      logForDebugging(
+        `[memdir] Vector selector failed: ${errorMessage(e)}, falling back to LLM`,
+        { level: 'warn' },
+      )
+      routerLog(`VECTOR error: ${errorMessage(e)}, falling back to LLM`)
+    }
+  }
+
+  // ── LLM selector (slow path: ~2000ms, ~500 tokens) ────────────────────────
+  const llmStartTime = Date.now()
   const manifest = formatMemoryManifest(memories)
 
   // When Claude Code is actively using a tool (e.g. mcp__X__spawn),
@@ -135,10 +188,25 @@ async function selectRelevantMemories(
 
       // Parse JSON from the local provider's text response
       const parsed: { selected_memories: string[] } = jsonParse(extractJson(localResult.text))
+      const selectedFilenames = parsed.selected_memories.filter(f => validFilenames.has(f))
+      const llmLatency = Date.now() - llmStartTime
       logForDebugging(
-        `[memdir] Local memory recall selected ${parsed.selected_memories.length} memories via ${localResult.provider}/${localResult.model}`,
+        `[memdir] Local memory recall selected ${selectedFilenames.length} memories via ${localResult.provider}/${localResult.model} in ${llmLatency}ms`,
       )
-      return parsed.selected_memories.filter(f => validFilenames.has(f))
+      routerLog(`LLM selected ${selectedFilenames.length} memories in ${llmLatency}ms via ${localResult.provider}/${localResult.model}: ${selectedFilenames.slice(0, 3).join(', ')}${selectedFilenames.length > 3 ? '...' : ''}`)
+
+      // Capture decision event for LLM fallback
+      if (isDecisionCaptureEnabled()) {
+        captureMemorySelection({
+          query,
+          selectedFiles: selectedFilenames,
+          selector: 'llm',
+          latencyMs: llmLatency,
+          indexStatus: 'unavailable',
+        }).catch(() => {})  // Fire and forget
+      }
+
+      return selectedFilenames
     }
 
     // Default: Anthropic sideQuery (original path)
@@ -174,7 +242,21 @@ async function selectRelevantMemories(
     }
 
     const parsed: { selected_memories: string[] } = jsonParse(textBlock.text)
-    return parsed.selected_memories.filter(f => validFilenames.has(f))
+    const selectedFilenames = parsed.selected_memories.filter(f => validFilenames.has(f))
+    const llmLatency = Date.now() - llmStartTime
+
+    // Capture decision event for Anthropic path
+    if (isDecisionCaptureEnabled()) {
+      captureMemorySelection({
+        query,
+        selectedFiles: selectedFilenames,
+        selector: 'llm',
+        latencyMs: llmLatency,
+        indexStatus: 'unavailable',
+      }).catch(() => {})  // Fire and forget
+    }
+
+    return selectedFilenames
   } catch (e) {
     if (signal.aborted) {
       return []

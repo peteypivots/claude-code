@@ -46,6 +46,9 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") ?? [];
 const GRACE_PERIOD_MS = parseInt(process.env.SESSION_GRACE_MS ?? String(5 * 60_000), 10);
 const SCROLLBACK_BYTES = parseInt(process.env.SCROLLBACK_BYTES ?? String(100 * 1024), 10);
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
+const CLAUDE_ARGS = (process.env.CLAUDE_ARGS ?? "")
+  .split(/\s+/)
+  .filter(Boolean);
 const AUTH_PROVIDER = process.env.AUTH_PROVIDER ?? "token";
 const SESSION_SECRET = process.env.SESSION_SECRET ?? crypto.randomUUID();
 const USER_HOME_BASE = process.env.USER_HOME_BASE ?? "/home/claude/users";
@@ -107,7 +110,7 @@ const sessionManager = new SessionManager(
   (cols, rows, user?: AuthUser) => {
     const userId = user?.id ?? "default";
     const home = userHomeDir(userId);
-    return spawn(CLAUDE_BIN, [], {
+    return spawn(CLAUDE_BIN, CLAUDE_ARGS, {
       name: "xterm-256color",
       cols,
       rows,

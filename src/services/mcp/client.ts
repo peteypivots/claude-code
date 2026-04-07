@@ -1757,6 +1757,70 @@ export const fetchToolsForClient = memoizeWithLRU(
       // Sanitize tool data from MCP server
       const toolsToProcess = recursivelySanitizeUnicode(result.tools)
 
+      function sanitizeMetaAiPrompt(prompt: string): string {
+        const topicMatch = prompt.match(/Research this topic comprehensively:\s*"([^"]+)"/i)
+        if (topicMatch?.[1]) {
+          return `Provide a concise analysis of: ${topicMatch[1]}`
+        }
+
+        const stripped = prompt
+          .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, ' ')
+          .replace(/^x-anthropic-billing-header:.*$/gim, ' ')
+          .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, ' ')
+          .replace(/<relevant-research>[\s\S]*?<\/relevant-research>/gi, ' ')
+          .replace(/Contents of \/app\/CLAUDE\.md[\s\S]*$/gi, ' ')
+          .split('\n')
+          .filter(line => {
+            const lower = line.toLowerCase()
+            return !(
+              lower.includes('meta_ai_chat') ||
+              lower.includes('nitter_search_tweets') ||
+              lower.includes('websearch') ||
+              lower.includes('call all three tools') ||
+              lower.includes('must call') ||
+              lower.includes('storage is automatic') ||
+              lower.includes('codebase and user instructions') ||
+              lower.includes('claudemd') ||
+              lower.includes('sessionstart:startup hook success') ||
+              lower.includes('tools available') ||
+              lower.includes('workertoolscontext') ||
+              lower.includes('mcp__') ||
+              lower.includes('tool_use') ||
+              lower.includes('tool_result')
+            )
+          })
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+
+        return stripped.slice(0, 800)
+      }
+
+      function sanitizeMcpArgs(
+        serverName: string,
+        toolName: string,
+        rawArgs: Record<string, unknown>,
+      ): Record<string, unknown> {
+        if (serverName !== 'meta-ai-mcp' || toolName !== 'meta_ai_chat') {
+          return rawArgs
+        }
+
+        const sanitized: Record<string, unknown> = {}
+        if (typeof rawArgs.prompt === 'string') {
+          sanitized.prompt = sanitizeMetaAiPrompt(rawArgs.prompt)
+        } else if (typeof rawArgs.message === 'string') {
+          sanitized.message = sanitizeMetaAiPrompt(rawArgs.message)
+        } else if (typeof rawArgs.query === 'string') {
+          sanitized.query = sanitizeMetaAiPrompt(rawArgs.query)
+        }
+
+        if ('timeout' in rawArgs) {
+          sanitized.timeout = rawArgs.timeout
+        }
+
+        return Object.keys(sanitized).length > 0 ? sanitized : rawArgs
+      }
+
       // Check if we should skip the mcp__ prefix for SDK MCP servers
       const skipPrefix =
         client.config.type === 'sdk' &&
@@ -1860,11 +1924,12 @@ export const fetchToolsForClient = memoizeWithLRU(
               for (let attempt = 0; ; attempt++) {
                 try {
                   const connectedClient = await ensureConnectedClient(client)
+                  const sanitizedArgs = sanitizeMcpArgs(client.name, tool.name, args)
                   const mcpResult = await callMCPToolWithUrlElicitationRetry({
                     client: connectedClient,
                     clientConnection: client,
                     tool: tool.name,
-                    args,
+                    args: sanitizedArgs,
                     meta,
                     signal: context.abortController.signal,
                     setAppState: context.setAppState,

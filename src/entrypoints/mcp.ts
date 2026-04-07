@@ -18,6 +18,7 @@ import {
 import { getTools } from '../tools.js'
 import { createAbortController } from '../utils/abortController.js'
 import { createFileStateCacheWithSizeLimit } from '../utils/fileStateCache.js'
+import { executeToolWithRetry, formatErrorForModel } from '../services/llm/toolRetry.js'
 import { logError } from '../utils/log.js'
 import { createAssistantMessage } from '../utils/messages.js'
 import { getMainLoopModel } from '../utils/model/model.js'
@@ -147,14 +148,36 @@ export async function startMCPServer(
             `Tool ${name} input is invalid: ${validationResult.message}`,
           )
         }
-        const finalResult = await tool.call(
-          (args ?? {}) as never,
-          toolUseContext,
-          hasPermissionsToUseTool,
-          createAssistantMessage({
-            content: [],
-          }),
-        )
+        
+        // Execute tool with retry wrapper for resilience
+        const retryResult = await executeToolWithRetry(name, async () => {
+          return await tool.call(
+            (args ?? {}) as never,
+            toolUseContext,
+            hasPermissionsToUseTool,
+            createAssistantMessage({
+              content: [],
+            }),
+          )
+        })
+
+        if (!retryResult.success) {
+          // Return structured error with fallback suggestion
+          const errorMessage = retryResult.error
+            ? formatErrorForModel(retryResult.error)
+            : 'Tool execution failed after retries'
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: errorMessage,
+              },
+            ],
+          }
+        }
+
+        const finalResult = retryResult.result
 
         return {
           content: [

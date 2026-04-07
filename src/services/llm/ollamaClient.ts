@@ -569,13 +569,17 @@ export class OllamaProvider implements ILLMProvider {
     options: LLMRequestOptions,
     requestId: number,
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
-    // Log caller context to identify which code path is making this call
     const firstUserMsg = options.messages.find(m => m.role === 'user')
-    const msgPreview = firstUserMsg 
-      ? (typeof firstUserMsg.content === 'string' ? firstUserMsg.content : JSON.stringify(firstUserMsg.content)).substring(0, 100)
-      : 'no-user-msg'
-    ollamaLog(`[REQ-${requestId}] First user msg: ${msgPreview}`)
-    ollamaLog(`[REQ-${requestId}] System prompt: ${(options.systemPrompt || '(none)').substring(0, 100)}`)
+    const firstUserSummary = firstUserMsg
+      ? typeof firstUserMsg.content === 'string'
+        ? `text(len=${firstUserMsg.content.length})`
+        : `blocks(len=${firstUserMsg.content.length})`
+      : 'none'
+    const systemPromptSummary = options.systemPrompt
+      ? `present(len=${options.systemPrompt.length})`
+      : 'none'
+    ollamaLog(`[REQ-${requestId}] First user msg: ${firstUserSummary}`)
+    ollamaLog(`[REQ-${requestId}] System prompt: ${systemPromptSummary}`)
     
     const messages = this.convertMessages(options.messages)
     
@@ -584,10 +588,13 @@ export class OllamaProvider implements ILLMProvider {
       console.log(`[OllamaClient] Sending ${messages.length} messages to model`)
       for (const m of messages) {
         if (m.role === 'tool') {
-          console.log(`[OllamaClient]   TOOL msg: tool_call_id=${(m as any).tool_call_id}, content=${String((m as any).content).substring(0, 100)}...`)
+          const toolContent = String((m as any).content ?? '')
+          console.log(`[OllamaClient]   TOOL msg: tool_call_id=${(m as any).tool_call_id}, content_len=${toolContent.length}`)
         } else {
-          const contentPreview = typeof m.content === 'string' ? m.content.substring(0, 80) : JSON.stringify(m.content).substring(0, 80)
-          console.log(`[OllamaClient]   ${m.role}: ${contentPreview}...`)
+          const contentLen = typeof m.content === 'string'
+            ? m.content.length
+            : JSON.stringify(m.content).length
+          console.log(`[OllamaClient]   ${m.role}: content_len=${contentLen}`)
         }
       }
     }

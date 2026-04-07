@@ -28,6 +28,8 @@ const FEATURE_FLAGS: Record<string, boolean> = {
   BUDDY: envBool('CLAUDE_CODE_BUDDY', false),
   MCP_SKILLS: envBool('CLAUDE_CODE_MCP_SKILLS', false),
   REACTIVE_COMPACT: envBool('CLAUDE_CODE_REACTIVE_COMPACT', false),
+  // Memory extraction — enabled by default for local-first mode
+  EXTRACT_MEMORIES: envBool('CLAUDE_CODE_EXTRACT_MEMORIES', true),
 }
 
 function envBool(key: string, fallback: boolean): boolean {
