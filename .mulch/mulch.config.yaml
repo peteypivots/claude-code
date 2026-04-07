@@ -13,6 +13,7 @@ domains:
   - os-eco
   - training-capture
   - development
+  - training
 governance:
   max_entries: 100
   warn_entries: 150
