@@ -1118,10 +1118,11 @@ async function* handleLocalAction(
     // If the orchestrator suggested a tool, hint the model to use it
     // Filter out invalid "meta-tool" suggestions that confuse the model
     const invalidToolSuggestions = ['userinput', 'user_input', 'clarify', 'ask', 'question', 'none', 'null', 'userquestion']
-    const suggestedTool = decision.suggestedTool?.toLowerCase().trim()
-    const isValidToolSuggestion = suggestedTool && !invalidToolSuggestions.includes(suggestedTool)
+    const suggestedToolLower = decision.suggestedTool?.toLowerCase().trim()
+    const isInvalidTool = suggestedToolLower && invalidToolSuggestions.includes(suggestedToolLower)
+    routerLog(`[DEBUG] suggestedTool="${decision.suggestedTool}" lower="${suggestedToolLower}" isInvalid=${isInvalidTool}`)
     
-    if (isValidToolSuggestion && decision.suggestedTool) {
+    if (decision.suggestedTool && !isInvalidTool) {
       // In coordinator mode, the model only has Agent + TaskStop.
       // Rewrite the hint to delegate via Agent instead of calling the tool directly.
       const isCoordinator = isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE)
@@ -1131,8 +1132,8 @@ async function* handleLocalAction(
         systemPromptText += `\n\nIMPORTANT: For this query, you should use the "${decision.suggestedTool}" tool. Do NOT answer from memory — invoke the tool first.`
       }
       routerLog(`Added suggestedTool hint for: ${decision.suggestedTool}`)
-    } else if (decision.suggestedTool) {
-      routerLog(`Skipped invalid suggestedTool: ${decision.suggestedTool}`)
+    } else if (decision.suggestedTool && isInvalidTool) {
+      routerLog(`Skipped invalid suggestedTool: ${decision.suggestedTool} (matched invalidToolSuggestions)`)
     }
 
     // Check if we already have web search results in the conversation - if so, tell the model to answer.
