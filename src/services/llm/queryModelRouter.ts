@@ -1339,20 +1339,24 @@ async function* handleLocalAction(
     routerLog(`   Tokens: ${usage.inputTokens} in / ${usage.outputTokens} out`, 'debug')
     routerLog(`[STREAM] Total stream events yielded: ${yieldsCount}`, 'info')
 
-    // Yield final assistant message
-    routerLog(`[STREAM] Yielding final AssistantMessage`, 'success')
-    yield createAssistantMessage(accumulatedContent, decision.model, usage, {
-      routingDecision: decision.action as 'local' | 'reason' | 'escalate',
-      routingConfidence: decision.confidence || 0.7,
-      latencyMs: Date.now() - localStartTime,
-    })
-    recordLocalCall(usage.inputTokens + usage.outputTokens)
-
     // ── Training Capture ───────────────────────────────────────────────────
-    // Capture successful tool use or tool loop recovery for training data
+    // IMPORTANT: Capture BEFORE the final yield, because code after yield only
+    // runs if the consumer calls next() again. In -p mode, the CLI exits after
+    // receiving the final message, so capture code after yield never executes.
     routerLog(`[CAPTURE] isCaptureEnabled=${isCaptureEnabled()}, toolUses=${toolUses.length}, messagesLen=${messages.length}`)
     if (isCaptureEnabled()) {
       const finalText = textBlocks.map(b => b.type === 'text' ? b.text : '').join('')
+
+      // Debug: dump message structure to understand what we're working with
+      routerLog(`[CAPTURE-DEBUG] Message structure:`)
+      for (let i = 0; i < messages.length; i++) {
+        const m = messages[i]
+        const mType = m.type
+        const contentTypes = Array.isArray(m.message?.content)
+          ? m.message.content.map((c: any) => c.type || typeof c).join(', ')
+          : typeof m.message?.content
+        routerLog(`[CAPTURE-DEBUG]   [${i}] type=${mType}, contentTypes=[${contentTypes}]`)
+      }
 
       // Extract tool calls + results from full conversation history
       // (toolUses only has current turn's calls, which is empty on the answer turn)
@@ -1369,6 +1373,7 @@ async function* handleLocalAction(
                 ? c.content
                 : JSON.stringify(c.content)
               toolResultMap.set(id, content)
+              routerLog(`[CAPTURE-DEBUG] Found tool_result: id=${id}, len=${content.length}`)
             }
           }
         }
@@ -1385,10 +1390,13 @@ async function* handleLocalAction(
                 arguments: JSON.stringify(tu.input),
                 result: toolResultMap.get(tu.id) || '',
               })
+              routerLog(`[CAPTURE-DEBUG] Found tool_use: name=${tu.name}, id=${tu.id}`)
             }
           }
         }
       }
+
+      routerLog(`[CAPTURE-DEBUG] toolResultMap.size=${toolResultMap.size}, historyToolCalls.length=${historyToolCalls.length}`)
 
       routerLog(`[CAPTURE] historyToolCalls=${historyToolCalls.length}, finalTextLen=${finalText.length}, loopedTool=${loopedToolName || 'none'}`)
       if (historyToolCalls.length > 0) {
@@ -1466,6 +1474,17 @@ async function* handleLocalAction(
         } catch (e) { routerLog(`Training capture error: ${e}`, 'error') }
       }
     }
+
+    // Yield final assistant message LAST (after all capture completes)
+    // Code after yield only runs if consumer calls next() again, which won't
+    // happen in -p mode, so all side effects must happen before this yield.
+    routerLog(`[STREAM] Yielding final AssistantMessage`, 'success')
+    yield createAssistantMessage(accumulatedContent, decision.model, usage, {
+      routingDecision: decision.action as 'local' | 'reason' | 'escalate',
+      routingConfidence: decision.confidence || 0.7,
+      latencyMs: Date.now() - localStartTime,
+    })
+    recordLocalCall(usage.inputTokens + usage.outputTokens)
 
   } catch (error) {
     if (config.verbose) {
