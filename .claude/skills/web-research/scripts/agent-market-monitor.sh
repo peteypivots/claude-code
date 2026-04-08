@@ -207,7 +207,7 @@ promote_nitter_users() {
   local posts
   posts=$(curl -sf -X POST "${LANCEDB_URL}/dbs/user_dbs/tables/nitter_posts/query" \
     -H "Content-Type: application/json" \
-    -d '{"limit":5000,"columns":["username","query"]}' 2>/dev/null) || {
+    -d '{"limit":5000,"columns":["username","source_query"]}' 2>/dev/null) || {
     echo "[$(date)]   Promote: nitter_posts query failed" >> "$LOG"
     return
   }
@@ -225,7 +225,7 @@ try:
     user_queries = {}
     for r in records:
         u = r.get('username', '').strip().lower()
-        q = r.get('query', '')
+        q = r.get('source_query', '')
         if u and q:
             user_queries.setdefault(u, set()).add(q)
     # Filter by threshold
